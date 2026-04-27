@@ -1,0 +1,22 @@
+{
+  "type": "module",
+  "private": true,
+  "name": "genomic-regions",
+  "version": "0.0.0",
+  "scripts": {
+    "clean": "rm -rf src/.observablehq/cache",
+    "build": "rm -rf dist && observable build",
+    "dev": "observable preview",
+    "deploy": "observable deploy",
+    "observable": "observable"
+  },
+  "dependencies": {
+    "@observablehq/framework": "^1.13.4",
+    "@uwdata/mosaic-core": "^0.24.2",
+    "@uwdata/mosaic-sql": "^0.24.2",
+    "@uwdata/vgplot": "^0.24.2"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}

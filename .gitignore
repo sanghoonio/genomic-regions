@@ -1,0 +1,10 @@
+.DS_Store
+/dist/
+node_modules/
+yarn-error.log
+src/.observablehq/cache/
+scripts/page.png
+
+# Parquets — too large to ship in the repo for now. Restore once we
+# decide on a hosted data location (column-pruned bundle, CDN, or build-time loader).
+src/data/dictionary/*.parquet
