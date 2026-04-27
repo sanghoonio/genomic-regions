@@ -17,7 +17,7 @@ toc: false
 
 Most of the human genome is non-coding. Most disease-associated variants sit in non-coding DNA. To interpret what those variants mean, we need a way to read what regulatory machinery is at any genomic location. This walkthrough treats regulatory elements as **words**, BED-file experiments as **documents**, and uses the distributional structure of co-occurrence to build a dictionary.
 
-Five steps: **(1)** what's in a BED file, **(2)** tokenizing files against a universe, **(3)** the embedding as an emergent grammar, **(4)** each experiment as a partial vocabulary, and **(5)** hypothesizing about what we don't know.
+Four steps: **(1)** projecting raw experimental peaks onto a shared vocabulary, **(2)** the embedding as an emergent grammar, **(3)** each experiment as a partial vocabulary, and **(4)** hypothesizing about what we don't know.
 
 Focus: **chromosome 16** of the human genome. Four narrative-anchoring loci to swap between.
 
@@ -57,7 +57,8 @@ const parquetUrls = {
   tracks: await FileAttachment("data/dictionary/featured_tracks.parquet").href,
   regionStats: await FileAttachment("data/dictionary/region_stats.parquet").href,
   cooccurrence: await FileAttachment("data/dictionary/region_cooccurrence.parquet").href,
-  tokenizedCorpus: await FileAttachment("data/dictionary/tokenized_corpus_chr16.parquet").href
+  tokenizedCorpus: await FileAttachment("data/dictionary/tokenized_corpus_chr16.parquet").href,
+  featuredSignal: await FileAttachment("data/dictionary/featured_signal.parquet").href
 };
 ```
 
@@ -71,7 +72,8 @@ const TABLE = {
   tracks: "dict_featured_tracks",
   regionStats: "dict_region_stats",
   cooccurrence: "dict_cooccurrence",
-  tokenizedCorpus: "dict_tokenized_corpus"
+  tokenizedCorpus: "dict_tokenized_corpus",
+  featuredSignal: "dict_featured_signal"
 };
 ```
 
@@ -89,7 +91,8 @@ const tablesReady = await (async () => {
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tracks} AS SELECT * FROM read_parquet('${parquetUrls.tracks}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regionStats} AS SELECT * FROM read_parquet('${parquetUrls.regionStats}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.cooccurrence} AS SELECT * FROM read_parquet('${parquetUrls.cooccurrence}')`),
-    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tokenizedCorpus} AS SELECT * FROM read_parquet('${parquetUrls.tokenizedCorpus}')`)
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tokenizedCorpus} AS SELECT * FROM read_parquet('${parquetUrls.tokenizedCorpus}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredSignal} AS SELECT * FROM read_parquet('${parquetUrls.featuredSignal}')`)
   ]);
   return true;
 })();
@@ -106,6 +109,7 @@ const tracks = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.tracks}`));
 const filesRows = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.files}`));
 const regions = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.regions}`));
 const regionStats = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.regionStats}`));
+const featuredSignal = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.featuredSignal}`));
 ```
 
 ```js
@@ -116,7 +120,7 @@ const allFileLabels = Array.from(new Set(featuredFiles.map(fileLabel))).sort();
 
 ```js
 // Featured interval picker. Drives the x-domain of Steps 1/2 and the
-// outlined-tokens overlay in Step 3.
+// outlined-tokens overlay in Step 2.
 const currentInterval = view(Inputs.select(intervals, {
   label: "Featured interval",
   format: (i) => i.label,
@@ -128,15 +132,27 @@ const currentInterval = view(Inputs.select(intervals, {
 ${currentInterval.chrom}:${currentInterval.start.toLocaleString()}–${currentInterval.end.toLocaleString()} — ${currentInterval.narrative_caption}
 </div>
 
-## 1. Reading the raw experimental data
+## 1. From raw experiments to a shared vocabulary
 
-A BED file is the standard format for genomic experimental results: a list of intervals where some kind of activity was detected. ATAC-seq contains intervals where chromatin is accessible. ChIP-seq contains intervals where a specific protein binds. DNase-seq contains intervals of nuclease hypersensitivity. Each experiment emphasizes different aspects of regulatory biology.
+The thing a regulatory experiment actually outputs is a **continuous signal track** over the genome — read pileups, fold-change over background, hypersensitivity intensity. Peak callers threshold that signal to produce a **BED file**: a discrete list of intervals. Different callers, different parameters, slightly different boundaries — so two BEDs that agree biologically still don't agree at the bp.
+
+To get a fixed dictionary we **project peaks onto a universe** of regulatory regions (the [SCREEN](https://screen.encodeproject.org/) candidate cis-regulatory elements, which integrate evidence across many ENCODE experiments). Every peak collapses to whichever universe regions it overlaps, and each file becomes a binary presence vector — that's tokenization.
+
+Toggle through the three views to watch the abstraction emerge.
 
 ```js
-// Per-file peak rows for the currently selected interval. Mirrors mattress's
-// Step1Peaks reshape. Filter to peaks ≥ 200 bp — sub-200 bp peaks are
-// sub-pixel at chr16-window scales and look inconsistent.
-const step1PeakRows = (() => {
+const view1Mode = view(Inputs.radio(
+  ["continuous", "peaks", "tokens"],
+  {value: "continuous", label: "View"}
+));
+```
+
+```js
+// Per-file peak rows + per-file token rows + universe rows for the current
+// featured interval. Computed once; the toggle picks which set to render.
+const UNIVERSE_LABEL = "UNIVERSE";
+
+const peakRows = (() => {
   const fileById = new Map(featuredFiles.map((f) => [f.file_id, f]));
   const rows = [];
   for (const t of tracks) {
@@ -157,73 +173,16 @@ const step1PeakRows = (() => {
   }
   return rows.filter((d) => d.peak_end - d.peak_start >= 200);
 })();
-```
 
-```js
-Plot.plot({
-  width: 900,
-  height: Math.max(220, 22 * allFileLabels.length),
-  marginLeft: 220,
-  marginRight: 30,
-  marginTop: 30,
-  marginBottom: 40,
-  x: {
-    domain: [currentInterval.start, currentInterval.end],
-    label: currentInterval.chrom,
-    grid: true,
-    tickFormat: (d) => (d / 1e6).toFixed(2) + "M"
-  },
-  y: { label: "experiment", domain: allFileLabels, padding: 0.2 },
-  color: {
-    domain: ASSAY_COLOR_DOMAIN,
-    range: ASSAY_COLOR_RANGE,
-    legend: true
-  },
-  marks: [
-    Plot.ruleY(allFileLabels, { stroke: "#eee", strokeWidth: 1 }),
-    Plot.barX(step1PeakRows, {
-      x1: "peak_start",
-      x2: "peak_end",
-      y: "file_label",
-      fill: "assay",
-      stroke: (d) => (d.role === "mystery" ? "black" : "white"),
-      strokeWidth: 0.5,
-      insetTop: 3,
-      insetBottom: 3,
-      clip: true,
-      title: (d) =>
-        `${d.file_label}\npeak: ${d.peak_start.toLocaleString()}–${d.peak_end.toLocaleString()} (${d.peak_end - d.peak_start} bp)`
-    })
-  ]
-})
-```
-
-<div style="font-size: 0.85em; color: #666;">
-${new Set(step1PeakRows.map((r) => r.file_id)).size} experiments, ${step1PeakRows.length} peak intervals (≥200 bp) shown.
-</div>
-
-## 2. Tokenizing against a universe
-
-Continuous coordinates don't make a dictionary — different experiments have slightly different peak boundaries even where they agree. We project each file onto a fixed *universe* of regulatory regions (the [SCREEN](https://screen.encodeproject.org/) candidate cis-regulatory elements, which integrate evidence across many ENCODE experiments). Each file becomes a binary presence vector.
-
-```js
-// Universe regions overlapping the current interval (top y-band).
 const universeRows = regions
   .filter((r) =>
     r.chrom === currentInterval.chrom &&
     r.end > currentInterval.start &&
-    r.start < currentInterval.end
+    r.start < currentInterval.end &&
+    r.end - r.start >= 200
   )
-  .map((r) => ({
-    token_id: r.token_id,
-    cclass: r.cclass,
-    start: r.start,
-    end: r.end
-  }));
-```
+  .map((r) => ({...r, label: UNIVERSE_LABEL}));
 
-```js
-// Per-file token activations within the current interval (file y-bands).
 const tokenRows = (() => {
   const tokenLookup = new Map(regions.map((r) => [r.token_id, r]));
   const fileById = new Map(featuredFiles.map((f) => [f.file_id, f]));
@@ -246,21 +205,55 @@ const tokenRows = (() => {
       });
     }
   }
-  return rows;
+  return rows.filter((d) => d.end - d.start >= 200);
 })();
 ```
 
 ```js
-// Combined plot: universe row at top, file rows below. Same x-domain as
-// Step 1 → tokens align with peaks above.
-const UNIVERSE_LABEL = "— UNIVERSE —";
-const yDomain = [UNIVERSE_LABEL, ...allFileLabels];
-const wideUniverse = universeRows.filter((r) => r.end - r.start >= 200);
-const wideTokens = tokenRows.filter((d) => d.end - d.start >= 200);
+// Per-bin signal points for the current interval, flattened from
+// featuredSignal's list-columns. One row per (file, bin).
+const signalRows = (() => {
+  const fileById = new Map(featuredFiles.map((f) => [f.file_id, f]));
+  const out = [];
+  for (const s of featuredSignal) {
+    if (s.interval_id !== currentInterval.interval_id) continue;
+    const f = fileById.get(s.file_id);
+    if (!f) continue;
+    const label = fileLabel(f);
+    const positions = s.positions;
+    const values = s.values;
+    for (let i = 0; i < positions.length; i++) {
+      out.push({
+        file_label: label,
+        assay: f.assay,
+        position: positions[i],
+        value: Number.isFinite(values[i]) ? values[i] : 0
+      });
+    }
+  }
+  return out;
+})();
+```
+
+```js
+// Single combined plot. Universe row stays anchored at the top of the
+// y-domain across all three modes so file rows don't reflow on toggle.
+//   continuous → bigwig signal trace per file (faceted, per-row y-scale);
+//                universe shown in black.
+//   peaks      → BED peak rectangles per file colored by assay; universe in black.
+//   tokens     → universe + per-file token activations colored by SCREEN class.
+const isTokens = view1Mode === "tokens";
+const isContinuous = view1Mode === "continuous";
+const PAD_LABEL = " ";
+const baseRows = [UNIVERSE_LABEL, ...allFileLabels];
+const yDomain = isContinuous ? [...baseRows, PAD_LABEL] : baseRows;
+// Plot height stays constant across modes — pad row in continuous shares the
+// existing total area so toggling doesn't reflow surrounding content.
+const plotHeight = Math.max(260, 22 * baseRows.length);
 
 display(Plot.plot({
   width: 900,
-  height: Math.max(220, 22 * yDomain.length),
+  height: plotHeight,
   marginLeft: 220,
   marginRight: 30,
   marginTop: 30,
@@ -269,62 +262,154 @@ display(Plot.plot({
     domain: [currentInterval.start, currentInterval.end],
     label: currentInterval.chrom,
     grid: true,
-    tickFormat: (d) => (d / 1e6).toFixed(2) + "M"
+    tickFormat: (d) => (d / 1e6).toFixed(2) + "M",
+    // Suppress default x axis in continuous mode — replaced below with a
+    // Plot.axisX mark shifted 1px down so ticks/labels clear the bottom rule.
+    ...(isContinuous ? {axis: null} : {})
   },
-  y: { label: null, domain: yDomain, padding: 0.2 },
-  color: {
-    domain: SCREEN_CLASS_COLOR_DOMAIN,
-    range: SCREEN_CLASS_COLOR_RANGE,
-    legend: true
-  },
-  marks: [
-    Plot.ruleY(allFileLabels, { stroke: "#eee", strokeWidth: 1 }),
-    Plot.ruleY([UNIVERSE_LABEL], { stroke: "#888", strokeWidth: 1 }),
-    Plot.barX(
-      wideUniverse.map((r) => ({ ...r, label: UNIVERSE_LABEL })),
-      {
-        x1: "start",
-        x2: "end",
-        y: "label",
-        fill: (d) => classColor(d.cclass),
-        insetTop: 2,
-        insetBottom: 2,
-        clip: true,
-        title: (d) =>
-          `${d.cclass ?? "(no class)"}: ${d.start.toLocaleString()}–${d.end.toLocaleString()} (${d.end - d.start} bp)`
+  // Categorical-y modes (peaks, tokens) use a shared y axis;
+  // continuous mode facets per file_label so each row has its own y scale.
+  ...(isContinuous
+    ? {
+        y: {axis: null},
+        fy: {
+          domain: yDomain,
+          label: null,
+          padding: 0,
+          axis: null
+        }
       }
-    ),
-    Plot.barX(wideTokens, {
+    : {
+        y: {label: null, domain: yDomain, padding: 0.2}
+      }),
+  color: isTokens
+    ? {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true}
+    : {domain: ASSAY_COLOR_DOMAIN, range: ASSAY_COLOR_RANGE, legend: true},
+  marks: [
+    // Per-row guide rules (only meaningful in non-faceted modes)
+    ...(!isContinuous
+      ? [
+          Plot.ruleY(allFileLabels, {stroke: "#eee", strokeWidth: 1}),
+          Plot.ruleY([UNIVERSE_LABEL], {stroke: "#888", strokeWidth: 1})
+        ]
+      : []),
+    // Universe row — same in every mode (color depends on mode)
+    Plot.rect(universeRows, {
       x1: "start",
       x2: "end",
-      y: "file_label",
-      fill: (d) => classColor(d.cclass),
-      stroke: "white",
-      strokeWidth: 0.5,
-      insetTop: 3,
-      insetBottom: 3,
+      ...(isContinuous ? {fy: () => UNIVERSE_LABEL, y1: 0, y2: 1} : {y: "label"}),
+      fill: isTokens ? (d) => classColor(d.cclass) : "black",
+      insetTop: 2,
+      insetBottom: 2,
       clip: true,
       title: (d) =>
-        `${d.file_label}\ntoken ${d.token_id} (${d.cclass ?? "no class"})\n${d.start.toLocaleString()}–${d.end.toLocaleString()} (${d.end - d.start} bp)`
-    })
+        `${d.cclass ?? "(no class)"}: ${d.start.toLocaleString()}–${d.end.toLocaleString()} (${d.end - d.start} bp)`
+    }),
+    // Mode-specific file-row marks
+    ...(isContinuous
+      ? [
+          Plot.areaY(signalRows, {
+            x: "position",
+            y: "value",
+            fy: "file_label",
+            fill: "assay",
+            fillOpacity: 0.85,
+            curve: "step",
+            clip: true
+          }),
+          // Invisible anchor so Plot allocates a real band for the pad row.
+          Plot.rect([{}], {
+            fy: () => PAD_LABEL,
+            x1: currentInterval.start,
+            x2: currentInterval.end,
+            y1: 0,
+            y2: 1,
+            fillOpacity: 0
+          }),
+          // With fy padding=0 the facets are flush; this draws a thin line
+          // along the bottom of every non-pad facet so the rows are visually
+          // delimited (data-driven so the pad row gets no border).
+          Plot.ruleY(
+            baseRows.map((label) => ({fy: label, y: 0})),
+            {fy: "fy", y: "y", stroke: "#ddd", strokeWidth: 0.5}
+          ),
+          // Custom y-axis: real Plot tick marks + labels positioned near the
+          // bottom edge of each non-pad band. Default axis is suppressed
+          // (`axis: null`) since it centers in the band; `dy` shifts the
+          // axisFy elements from band center to its bottom rule. `ticks`
+          // restricts both tick marks and labels to non-pad rows.
+          Plot.axisFy({
+            anchor: "left",
+            dy: 8.5,
+            fontSize: 10,
+            tickSize: 6,
+            ticks: baseRows
+          }),
+          // Custom x axis shifted 1px down — keeps tickFormat/label from the
+          // scale config (which still drives the gridlines). labelOffset
+          // bumped 1 above Plot's default so the title lands at +2 total
+          // while the ticks stay at +1.
+          Plot.axisX({
+            anchor: "bottom",
+            dy: 1,
+            tickFormat: (d) => (d / 1e6).toFixed(2) + "M",
+            label: currentInterval.chrom,
+            labelOffset: 38
+          })
+        ]
+      : isTokens
+        ? [
+            Plot.barX(tokenRows, {
+              x1: "start",
+              x2: "end",
+              y: "file_label",
+              fill: (d) => classColor(d.cclass),
+              stroke: "white",
+              strokeWidth: 0.5,
+              insetTop: 3,
+              insetBottom: 3,
+              clip: true,
+              title: (d) =>
+                `${d.file_label}\ntoken ${d.token_id} (${d.cclass ?? "no class"})\n${d.start.toLocaleString()}–${d.end.toLocaleString()} (${d.end - d.start} bp)`
+            })
+          ]
+        : [
+            Plot.barX(peakRows, {
+              x1: "peak_start",
+              x2: "peak_end",
+              y: "file_label",
+              fill: "assay",
+              stroke: (d) => (d.role === "mystery" ? "black" : "white"),
+              strokeWidth: 0.5,
+              insetTop: 3,
+              insetBottom: 3,
+              clip: true,
+              title: (d) =>
+                `${d.file_label}\npeak: ${d.peak_start.toLocaleString()}–${d.peak_end.toLocaleString()} (${d.peak_end - d.peak_start} bp)`
+            })
+          ])
   ]
 }));
 ```
 
 <div style="font-size: 0.85em; color: #666;">
-${universeRows.length} universe tokens in this interval; ${tokenRows.length} (file × token) activations across ${allFileLabels.length} files.
+${view1Mode === "tokens"
+  ? `${universeRows.length} universe tokens in this interval; ${tokenRows.length} (file × token) activations across ${allFileLabels.length} files.`
+  : view1Mode === "continuous"
+    ? `Bigwig signal (fold-change over control) sampled at ${signalRows.length / Math.max(1, allFileLabels.length) | 0} bins per file across ${allFileLabels.length} files.`
+    : `${new Set(peakRows.map((r) => r.file_id)).size} experiments, ${peakRows.length} peak intervals (≥200 bp) shown.`}
 </div>
 
-## 3. A learned grammar
+## 2. A learned grammar
 
 With every BED file as a binary "sentence" of universe tokens, a word2vec-style model ([Region2Vec](https://academic.oup.com/bioinformatics/article/40/2/btae073/7613064)) learns a 100-dimensional embedding per region. Regions that show up in similar files together end up close in embedding space. Project to 2D, color by SCREEN regulatory class, and the embedding has learned the dictionary on its own — promoters cluster with promoters, enhancers with enhancers.
 
-The neighborhoods you see here are **embedding-space** neighborhoods — regions whose 100-dim R2V vectors are close. That's a stronger statement than "regions that happen to co-occur in BED files," which is what Step 5's cooccurrence panel will show. The two views agree most of the time but disagree in interesting places.
+The neighborhoods you see here are **embedding-space** neighborhoods — regions whose 100-dim R2V vectors are close. That's a stronger statement than "regions that happen to co-occur in BED files," which is what Step 4's cooccurrence panel below will show. The two views agree most of the time but disagree in interesting places.
 
 ```js
 // Region UMAP. Chr16 tokens colored by SCREEN class. Tokens overlapping
-// the currently picked featured interval are outlined to tie back to Step 2.
-// Click any dot to pick a focal region — the cooccurrence panel in Step 5
+// the currently picked featured interval are outlined to tie back to Step 1.
+// Click any dot to pick a focal region — the cooccurrence panel in Step 4 (last section)
 // reads from the same `pickedTokenId` Mutable.
 const inIntervalSet = new Set(
   regions
@@ -386,23 +471,26 @@ const regionUmap = (() => {
 ${regionUmap}
 
 <div style="font-size: 0.85em; color: #666; margin-top: -0.5em;">
-${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to pick a focal region for Step 5."}
+${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to pick a focal region for the cooccurrence panel in Step 4."}
 </div>
 
-## 4. Each experiment is a partial vocabulary
+## 3. Each experiment is a partial vocabulary
 
 Every BED file activates a subset of the universe — an experiment is a sentence that uses some words from the dictionary and not others. **Click any file** in the left UMAP to highlight the chr16 regions it uses on the right.
 
 ```js
-// Mutables holding the picked file id (Step 4) and the picked region
-// token id (Step 3 → Step 5). Other cells reference these by name to read
+// Mutables holding the picked file id (Step 3) and the picked region
+// token id (Step 2 → Step 4). Other cells reference these by name to read
 // the current value; to write, call the matching setter — its closure
 // captures the real Mutable wrapper, not the auto-unwrapped value.
 const pickedFileId = Mutable(null);
 function setPickedFileId(id) {
   pickedFileId.value = id;
 }
-const pickedTokenId = Mutable(null);
+// Default the focal token to the first universe token of the first
+// featured interval — gives Step 4 (cooccurrence) something meaningful to render on
+// first load instead of a flat placeholder.
+const pickedTokenId = Mutable(intervals[0]?.universe_token_ids?.[0] ?? null);
 function setPickedTokenId(id) {
   pickedTokenId.value = id;
 }
@@ -535,9 +623,9 @@ const pickedFileCaption = pickedFileMeta
 
 <div style="font-size: 0.85em; color: #666;">${pickedFileCaption}</div>
 
-## 5. Hypothesizing about what we don't know
+## 4. Hypothesizing about what we don't know
 
-The dictionary's class labels (PLS / pELS / dELS / ...) come from SCREEN's integrative ENCODE analysis. They cover a lot but are coarse — and they don't say what *context* a region operates in. The corpus itself contains evidence: every BED file activates a subset of the universe, so co-activation across files is a measurable signal of "these regions go together." This is a different question from Step 3's embedding-similarity — and the difference is exactly what makes contextual models like Atacformer interesting.
+The dictionary's class labels (PLS / pELS / dELS / ...) come from SCREEN's integrative ENCODE analysis. They cover a lot but are coarse — and they don't say what *context* a region operates in. The corpus itself contains evidence: every BED file activates a subset of the universe, so co-activation across files is a measurable signal of "these regions go together." This is a different question from Step 2's embedding-similarity — and the difference is exactly what makes contextual models like Atacformer interesting.
 
 For a clicked region, this panel pulls its top-30 cooccurrence partners (by Jaccard similarity in the chosen context) from the corpus and lays them on the region UMAP. Edges show which partners are spatially close in the embedding (the Step-3 view) and which aren't.
 
@@ -574,7 +662,7 @@ const egoPartners = await (async () => {
 const egoNetwork = (() => {
   if (pickedTokenId == null) {
     return html`<div style="padding: 1em; color: #666; border: 1px dashed #aaa; border-radius: 4px;">
-      Click a token in the Step 3 UMAP to see its cooccurrence partners.
+      Click a token in the Step 2 UMAP to see its cooccurrence partners.
     </div>`;
   }
   if (!egoPartners) {

@@ -81,8 +81,9 @@ for (const e of pageEvents) console.log(JSON.stringify(e));
 
 if (process.argv.includes("--screenshot")) {
   await page.setViewport({width: 1400, height: 4000, deviceScaleFactor: 1});
-  await page.screenshot({path: "scripts/page.png", fullPage: true});
-  console.log("\nscreenshot → scripts/page.png");
+  const path = "/Users/sam/Documents/Work/genomic-regions/scripts/page.png";
+  await page.screenshot({path, fullPage: true});
+  console.log("\nscreenshot →", path);
 }
 
 await browser.close();
