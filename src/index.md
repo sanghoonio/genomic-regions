@@ -5,6 +5,12 @@ toc: false
 
 <style>
   #observablehq-main { max-width: 1280px; }
+  #observablehq-main h1,
+  #observablehq-main h2,
+  #observablehq-main h3,
+  #observablehq-main p,
+  #observablehq-main ul,
+  #observablehq-main ol { max-width: none; }
 </style>
 
 # A Dictionary of Regulatory Genomics
@@ -48,7 +54,10 @@ const parquetUrls = {
   files: await FileAttachment("data/dictionary/viz_files.parquet").href,
   intervals: await FileAttachment("data/dictionary/featured_intervals.parquet").href,
   featuredFiles: await FileAttachment("data/dictionary/featured_files.parquet").href,
-  tracks: await FileAttachment("data/dictionary/featured_tracks.parquet").href
+  tracks: await FileAttachment("data/dictionary/featured_tracks.parquet").href,
+  regionStats: await FileAttachment("data/dictionary/region_stats.parquet").href,
+  cooccurrence: await FileAttachment("data/dictionary/region_cooccurrence.parquet").href,
+  tokenizedCorpus: await FileAttachment("data/dictionary/tokenized_corpus_chr16.parquet").href
 };
 ```
 
@@ -59,35 +68,44 @@ const TABLE = {
   files: "dict_files",
   intervals: "dict_featured_intervals",
   featuredFiles: "dict_featured_files",
-  tracks: "dict_featured_tracks"
+  tracks: "dict_featured_tracks",
+  regionStats: "dict_region_stats",
+  cooccurrence: "dict_cooccurrence",
+  tokenizedCorpus: "dict_tokenized_corpus"
 };
 ```
 
 ```js
 // Register each parquet as a DuckDB table. The `tablesReady` export gates
 // every downstream query/plot — anything that wants the data must read
-// `tablesReady`.
+// `tablesReady`. Big tables (cooccurrence, tokenized_corpus) are registered
+// here but not materialized — they're queried lazily on user interaction.
 const tablesReady = await (async () => {
   await Promise.all([
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regions} AS SELECT * FROM read_parquet('${parquetUrls.regions}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.files} AS SELECT * FROM read_parquet('${parquetUrls.files}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.intervals} AS SELECT * FROM read_parquet('${parquetUrls.intervals}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredFiles} AS SELECT * FROM read_parquet('${parquetUrls.featuredFiles}')`),
-    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tracks} AS SELECT * FROM read_parquet('${parquetUrls.tracks}')`)
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tracks} AS SELECT * FROM read_parquet('${parquetUrls.tracks}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regionStats} AS SELECT * FROM read_parquet('${parquetUrls.regionStats}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.cooccurrence} AS SELECT * FROM read_parquet('${parquetUrls.cooccurrence}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tokenizedCorpus} AS SELECT * FROM read_parquet('${parquetUrls.tokenizedCorpus}')`)
   ]);
   return true;
 })();
 ```
 
 ```js
-// Materialize tables into JS arrays. tablesReady is referenced so this
-// cell waits for table registration to finish before querying.
+// Materialize the small / always-needed tables into JS arrays. The two
+// large tables (cooccurrence, tokenized_corpus) stay in DuckDB and are
+// queried by file_id / token_id when the user clicks something.
 tablesReady;
 const intervals = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.intervals}`));
 const featuredFiles = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.featuredFiles}`));
 const tracks = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.tracks}`));
 const filesRows = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.files}`));
 const regions = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.regions}`));
+const regionStats = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.regionStats}`));
 ```
 
 ```js
@@ -301,144 +319,194 @@ ${universeRows.length} universe tokens in this interval; ${tokenRows.length} (fi
 
 With every BED file as a binary "sentence" of universe tokens, a word2vec-style model ([Region2Vec](https://academic.oup.com/bioinformatics/article/40/2/btae073/7613064)) learns a 100-dimensional embedding per region. Regions that show up in similar files together end up close in embedding space. Project to 2D, color by SCREEN regulatory class, and the embedding has learned the dictionary on its own — promoters cluster with promoters, enhancers with enhancers.
 
-```js
-// Shared selection: brushing on the region UMAP populates this and
-// downstream cells (Step 4 right pane, future Step 2 dimming) react.
-const regionSelection = vg.Selection.crossfilter();
-```
+The neighborhoods you see here are **embedding-space** neighborhoods — regions whose 100-dim R2V vectors are close. That's a stronger statement than "regions that happen to co-occur in BED files," which is what Step 5's cooccurrence panel will show. The two views agree most of the time but disagree in interesting places.
 
 ```js
-tablesReady;
-display(vg.plot(
-  vg.dot(vg.from(TABLE.regions, {filterBy: regionSelection}), {
-    x: "umap_x",
-    y: "umap_y",
-    fill: "cclass",
-    r: 1.4,
-    fillOpacity: 0.55
-  }),
-  vg.intervalXY({as: regionSelection}),
-  vg.colorDomain(SCREEN_CLASS_COLOR_DOMAIN),
-  vg.colorRange(SCREEN_CLASS_COLOR_RANGE),
-  vg.width(900),
-  vg.height(600),
-  vg.colorLegend(true)
-));
-```
-
-```js
-// Outline overlay: tokens within the current interval, drawn over the main
-// scatter via a second Plot layer (vgplot doesn't yet expose easy multi-mark
-// composition tied to JS-side state).
-const inIntervalRegions = regions.filter(
-  (r) =>
-    r.cclass !== null &&
-    r.chrom === currentInterval.chrom &&
-    r.end > currentInterval.start &&
-    r.start < currentInterval.end
+// Region UMAP. Chr16 tokens colored by SCREEN class. Tokens overlapping
+// the currently picked featured interval are outlined to tie back to Step 2.
+// Click any dot to pick a focal region — the cooccurrence panel in Step 5
+// reads from the same `pickedTokenId` Mutable.
+const inIntervalSet = new Set(
+  regions
+    .filter(
+      (r) =>
+        r.cclass !== null &&
+        r.chrom === currentInterval.chrom &&
+        r.end > currentInterval.start &&
+        r.start < currentInterval.end
+    )
+    .map((r) => r.token_id)
 );
+const classedChr16 = regions.filter((r) => r.cclass !== null);
+
+const regionUmap = (() => {
+  const inInterval = classedChr16.filter((r) => inIntervalSet.has(r.token_id));
+  const picked = pickedTokenId != null ? classedChr16.filter((r) => r.token_id === pickedTokenId) : [];
+  const plot = Plot.plot({
+    width: 900,
+    height: 600,
+    color: {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true},
+    marks: [
+      Plot.dot(classedChr16, {x: "umap_x", y: "umap_y", fill: "cclass", r: 1.4, fillOpacity: 0.55}),
+      Plot.dot(inInterval, {x: "umap_x", y: "umap_y", fill: "cclass", stroke: "black", strokeWidth: 0.7, r: 2.4}),
+      Plot.dot(picked, {x: "umap_x", y: "umap_y", stroke: "magenta", strokeWidth: 2.5, fill: "none", r: 10}),
+      Plot.dot(
+        classedChr16,
+        Plot.pointer({
+          x: "umap_x",
+          y: "umap_y",
+          stroke: "black",
+          strokeWidth: 1.2,
+          r: 5,
+          fill: "white",
+          fillOpacity: 0.8,
+          channels: {token_id: "token_id", region: "region", cclass: "cclass"}
+        })
+      ),
+      Plot.tip(
+        classedChr16,
+        Plot.pointer({
+          x: "umap_x",
+          y: "umap_y",
+          channels: {region: "region", cclass: "cclass", token_id: "token_id"},
+          format: {x: false, y: false, region: true, cclass: true, token_id: true}
+        })
+      )
+    ]
+  });
+  plot.style.cursor = "crosshair";
+  plot.addEventListener("click", () => {
+    const v = plot.value;
+    if (v && v.token_id != null) setPickedTokenId(v.token_id === pickedTokenId ? null : v.token_id);
+  });
+  return plot;
+})();
 ```
+
+${regionUmap}
 
 <div style="font-size: 0.85em; color: #666; margin-top: -0.5em;">
-${regions.filter((r) => r.cclass !== null).length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalRegions.length} tokens lie within the current interval.
+${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to pick a focal region for Step 5."}
 </div>
 
 ## 4. Each experiment is a partial vocabulary
 
-Every BED file activates a subset of the universe — an experiment is a sentence that uses some words from the dictionary and not others. Highlight a featured experiment to see which regions it uses.
+Every BED file activates a subset of the universe — an experiment is a sentence that uses some words from the dictionary and not others. **Click any file** in the left UMAP to highlight the chr16 regions it uses on the right.
 
 ```js
-const pickedFile = view(Inputs.select(
-  [{file_id: null, label: "(none)"}, ...featuredFiles.map((f) => ({
-    file_id: f.file_id,
-    label: `${f.role === "mystery" ? "[mystery] " : ""}${fileLabel(f)}`,
-    n_active: f.n_chr16_active_tokens
-  }))],
-  {
-    label: "Highlight a featured experiment",
-    format: (f) => f.label,
-    value: {file_id: null, label: "(none)"}
-  }
-));
+// Mutables holding the picked file id (Step 4) and the picked region
+// token id (Step 3 → Step 5). Other cells reference these by name to read
+// the current value; to write, call the matching setter — its closure
+// captures the real Mutable wrapper, not the auto-unwrapped value.
+const pickedFileId = Mutable(null);
+function setPickedFileId(id) {
+  pickedFileId.value = id;
+}
+const pickedTokenId = Mutable(null);
+function setPickedTokenId(id) {
+  pickedTokenId.value = id;
+}
 ```
 
 ```js
-const activeTokenSet = (() => {
-  if (!pickedFile.file_id) return new Set();
-  const f = featuredFiles.find((x) => x.file_id === pickedFile.file_id);
-  return new Set(f?.chr16_active_token_ids ?? []);
+// Lazy DuckDB query: when pickedFileId changes, fetch that file's chr16
+// active tokens from the 62 MB tokenized_corpus parquet. Cold start ~5s,
+// warm queries sub-second (DuckDB-WASM caches the file).
+const activeTokenIds = await (async () => {
+  const id = pickedFileId;
+  if (!id) return [];
+  const safe = String(id).replace(/'/g, "''");
+  const result = await coord.query(
+    `SELECT chr16_active_token_ids FROM ${TABLE.tokenizedCorpus} WHERE id = '${safe}'`
+  );
+  const rows = arrowToRows(result);
+  return rows[0]?.chr16_active_token_ids ?? [];
 })();
 ```
 
 ```js
-// File UMAP — labeled files colored by assay; mystery files as triangles.
-const labeledFiles = filesRows.filter((d) => !d.is_unlabeled);
-const mysteryFiles = filesRows.filter((d) => d.is_unlabeled);
-const pickedRow = pickedFile.file_id
-  ? filesRows.filter((d) => d.id === pickedFile.file_id)
-  : [];
-
-const fileUmap = Plot.plot({
-  width: 600,
-  height: 500,
-  color: {
-    domain: ASSAY_COLOR_DOMAIN,
-    range: ASSAY_COLOR_RANGE,
-    legend: true
-  },
-  marks: [
-    Plot.dot(labeledFiles, {
-      x: "umap_x",
-      y: "umap_y",
-      fill: "assay",
-      r: 1.4,
-      opacity: 0.4,
-      title: (d) => `${d.assay}\n${d.cell_line}\n${d.name}`
-    }),
-    Plot.dot(mysteryFiles, {
-      x: "umap_x",
-      y: "umap_y",
-      stroke: "black",
-      fill: "white",
-      r: 5,
-      symbol: "triangle",
-      title: (d) => `[mystery] ${d.name}`
-    }),
-    Plot.dot(pickedRow, {
-      x: "umap_x",
-      y: "umap_y",
-      stroke: "magenta",
-      strokeWidth: 2,
-      r: 8,
-      fill: "none"
-    })
-  ]
-});
+// File UMAP — clickable. All 16,794 files; click any dot to pick.
+// `Plot.pointer` puts the row under the cursor in plot.value; the click
+// handler reads that and writes to pickedFileId.
+const fileUmap = (() => {
+  const plot = Plot.plot({
+    width: 600,
+    height: 500,
+    color: {domain: ASSAY_COLOR_DOMAIN, range: ASSAY_COLOR_RANGE, legend: true},
+    marks: [
+      Plot.dot(filesRows, {
+        x: "umap_x",
+        y: "umap_y",
+        fill: "assay",
+        r: 1.6,
+        fillOpacity: 0.45
+      }),
+      ...(pickedFileId
+        ? [
+            Plot.dot(filesRows.filter((d) => d.id === pickedFileId), {
+              x: "umap_x",
+              y: "umap_y",
+              stroke: "magenta",
+              strokeWidth: 2,
+              r: 8,
+              fill: "none"
+            })
+          ]
+        : []),
+      Plot.dot(
+        filesRows,
+        Plot.pointer({
+          x: "umap_x",
+          y: "umap_y",
+          stroke: "black",
+          strokeWidth: 1.2,
+          r: 5,
+          fill: "white",
+          fillOpacity: 0.8,
+          channels: {id: "id", name: "name", cell_line: "cell_line", assay: "assay"}
+        })
+      ),
+      Plot.tip(
+        filesRows,
+        Plot.pointer({
+          x: "umap_x",
+          y: "umap_y",
+          channels: {file: "name", cell_line: "cell_line", assay: "assay"},
+          format: {file: true, cell_line: true, assay: true, x: false, y: false}
+        })
+      )
+    ]
+  });
+  plot.style.cursor = "crosshair";
+  plot.addEventListener("click", () => {
+    const v = plot.value;
+    if (v && v.id != null) setPickedFileId(v.id === pickedFileId ? null : v.id);
+  });
+  return plot;
+})();
 ```
 
 ```js
-// Region UMAP with the picked file's active tokens highlighted.
+// Region UMAP — chr16 tokens; tokens active in the picked file are
+// highlighted (larger, outlined) over a faded background.
 const classedRegions = regions.filter((r) => r.cclass !== null);
-const inactive = classedRegions.filter((d) => !activeTokenSet.has(d.token_id));
-const active = classedRegions.filter((d) => activeTokenSet.has(d.token_id));
+const activeTokenSet = new Set(activeTokenIds);
+const inactiveDots = classedRegions.filter((d) => !activeTokenSet.has(d.token_id));
+const activeDots = classedRegions.filter((d) => activeTokenSet.has(d.token_id));
 
 const regionUmapHighlight = Plot.plot({
   width: 600,
   height: 500,
-  color: {
-    domain: SCREEN_CLASS_COLOR_DOMAIN,
-    range: SCREEN_CLASS_COLOR_RANGE,
-    legend: true
-  },
+  color: {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true},
   marks: [
-    Plot.dot(inactive, {
+    Plot.dot(inactiveDots, {
       x: "umap_x",
       y: "umap_y",
       fill: "cclass",
       r: 1,
-      opacity: pickedFile.file_id ? 0.1 : 0.55
+      opacity: pickedFileId ? 0.1 : 0.55
     }),
-    Plot.dot(active, {
+    Plot.dot(activeDots, {
       x: "umap_x",
       y: "umap_y",
       fill: "cclass",
@@ -451,21 +519,143 @@ const regionUmapHighlight = Plot.plot({
 });
 ```
 
+```js
+// Caption: file metadata + activation count for the picked file.
+const pickedFileMeta = pickedFileId ? filesRows.find((d) => d.id === pickedFileId) : null;
+const cleanField = (s) => (s && s !== "UNKNOWN" ? s : "");
+const pickedFileCaption = pickedFileMeta
+  ? `${pickedFileMeta.assay} · ${cleanField(pickedFileMeta.cell_line) || "—"}${cleanField(pickedFileMeta.cell_type) ? " (" + cleanField(pickedFileMeta.cell_type) + ")" : ""} · ${activeTokenIds.length.toLocaleString()} chr16 tokens active. ${pickedFileMeta.name}`
+  : "Click a file in the left UMAP to highlight its chr16 token activations on the right.";
+```
+
 <div style="display: flex; gap: 16px; flex-wrap: wrap;">
   <div>${fileUmap}</div>
   <div>${regionUmapHighlight}</div>
 </div>
 
-<div style="font-size: 0.85em; color: #666;">
-${pickedFile.file_id
-  ? `${pickedFile.n_active.toLocaleString()} chr16 tokens active in this experiment.`
-  : "Pick an experiment to see the regions it activates."}
-</div>
+<div style="font-size: 0.85em; color: #666;">${pickedFileCaption}</div>
 
 ## 5. Hypothesizing about what we don't know
 
-The dictionary's class labels (PLS / pELS / dELS / ...) come from SCREEN's integrative ENCODE analysis. They cover a lot but are coarse — and they don't tell us what biological context a region operates in. Embedding-space neighborhoods give us a tool for interpolation: *what is this region like? what is this experiment like?*
+The dictionary's class labels (PLS / pELS / dELS / ...) come from SCREEN's integrative ENCODE analysis. They cover a lot but are coarse — and they don't say what *context* a region operates in. The corpus itself contains evidence: every BED file activates a subset of the universe, so co-activation across files is a measurable signal of "these regions go together." This is a different question from Step 3's embedding-similarity — and the difference is exactly what makes contextual models like Atacformer interesting.
 
-<div style="padding: 1em; border: 1px dashed #aaa; border-radius: 4px; color: #555; font-style: italic;">
-Step 5 placeholder — kNN class aggregation for a selected region, and file-UMAP-kNN aggregation for a selected mystery file. Tracked in <code>plans/2026-04-26-region-interpretation-step5.md</code>.
+For a clicked region, this panel pulls its top-30 cooccurrence partners (by Jaccard similarity in the chosen context) from the corpus and lays them on the region UMAP. Edges show which partners are spatially close in the embedding (the Step-3 view) and which aren't.
+
+```js
+const cooccurContext = view(Inputs.select(
+  ["all", "K562", "GM12878", "HepG2"],
+  {label: "Cooccurrence context", value: "all"}
+));
+```
+
+```js
+// Lazy DuckDB query for the top-30 cooccurrence partners of the picked
+// token in the chosen context. Runs only when both inputs are set.
+const egoPartners = await (async () => {
+  if (pickedTokenId == null) return null;
+  const safeCtx = String(cooccurContext).replace(/'/g, "''");
+  const result = await coord.query(
+    `SELECT token_id, n_files_active, partner_token_ids, weights_jaccard, counts
+     FROM ${TABLE.cooccurrence}
+     WHERE token_id = ${Number(pickedTokenId)} AND context = '${safeCtx}'`
+  );
+  const rows = arrowToRows(result);
+  return rows[0] ?? null;
+})();
+```
+
+```js
+// Ego network rendered ONTO the region UMAP. Background = faded Step-3
+// scatter, focal = magenta ring, partners = colored + sized by Jaccard,
+// edges = focal→partner with stroke width = Jaccard. Cooccurrence partners
+// that cluster spatially with the focal token are also embedding-similar;
+// scattered partners are corpus-co-active despite *not* being embedding
+// neighbors — those are the interesting cases.
+const egoNetwork = (() => {
+  if (pickedTokenId == null) {
+    return html`<div style="padding: 1em; color: #666; border: 1px dashed #aaa; border-radius: 4px;">
+      Click a token in the Step 3 UMAP to see its cooccurrence partners.
+    </div>`;
+  }
+  if (!egoPartners) {
+    return html`<div style="padding: 1em; color: #888;">No cooccurrence row for token ${pickedTokenId} in context "${cooccurContext}".</div>`;
+  }
+  const focal = classedChr16.find((r) => r.token_id === pickedTokenId)
+    ?? regions.find((r) => r.token_id === pickedTokenId);
+  if (!focal) {
+    return html`<div style="padding: 1em; color: #888;">Token ${pickedTokenId} not in chr16 universe.</div>`;
+  }
+  const tokenLookup = new Map(regions.map((r) => [r.token_id, r]));
+  const edges = egoPartners.partner_token_ids.map((pid, i) => {
+    const p = tokenLookup.get(pid);
+    if (!p) return null;
+    return {
+      partner_id: pid,
+      weight: egoPartners.weights_jaccard[i],
+      count: egoPartners.counts[i],
+      partner_x: p.umap_x,
+      partner_y: p.umap_y,
+      cclass: p.cclass,
+      region: p.region,
+      focal_x: focal.umap_x,
+      focal_y: focal.umap_y
+    };
+  }).filter(Boolean);
+
+  return Plot.plot({
+    width: 900,
+    height: 600,
+    color: {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true},
+    marks: [
+      Plot.dot(classedChr16, {x: "umap_x", y: "umap_y", fill: "cclass", r: 1, opacity: 0.08}),
+      Plot.link(edges, {
+        x1: "focal_x", y1: "focal_y",
+        x2: "partner_x", y2: "partner_y",
+        stroke: "#444",
+        strokeOpacity: 0.5,
+        strokeWidth: (d) => 0.5 + d.weight * 7
+      }),
+      Plot.dot(edges, {
+        x: "partner_x",
+        y: "partner_y",
+        fill: "cclass",
+        stroke: "black",
+        strokeWidth: 0.5,
+        r: (d) => 3 + d.weight * 8,
+        title: (d) => `${d.region}\n${d.cclass ?? "(no class)"}\nJaccard: ${d.weight.toFixed(3)}\nCo-active in ${d.count} files`
+      }),
+      Plot.dot([focal], {
+        x: "umap_x",
+        y: "umap_y",
+        stroke: "magenta",
+        strokeWidth: 2.5,
+        fill: "white",
+        r: 11
+      }),
+      Plot.text([focal], {
+        x: "umap_x",
+        y: "umap_y",
+        text: () => "★",
+        fill: "magenta",
+        fontSize: 14,
+        textAnchor: "middle"
+      })
+    ]
+  });
+})();
+```
+
+${egoNetwork}
+
+<div style="font-size: 0.85em; color: #666; margin-top: -0.5em;">
+${pickedTokenId != null && egoPartners
+  ? `Focal token <strong>${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? pickedTokenId}</strong> is active in ${Number(egoPartners.n_files_active).toLocaleString()} ${cooccurContext === "all" ? "files" : cooccurContext + " files"}. Showing its top ${egoPartners.partner_token_ids.length} Jaccard partners.`
+  : ""}
 </div>
+
+<details>
+<summary style="cursor: pointer; color: #555;">Why per-context contrast?</summary>
+<div style="margin-top: 0.5em; color: #555;">
+Switch the context selector across <code>K562</code> / <code>GM12878</code> / <code>HepG2</code>: a region's cooccurrence neighbors usually shift, sometimes dramatically. That shift is exactly what cell-type-specific regulatory models (Atacformer-style) capture and what context-blind models (vanilla R2V) collapse — Jaccard partners that are stable across contexts vs. those that aren't tell you which regions have universal grammar and which have cell-type-specific grammar.
+</div>
+</details>
