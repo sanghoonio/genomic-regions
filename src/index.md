@@ -17,13 +17,13 @@ toc: false
 
 Most of the human genome is non-coding. Most disease-associated variants sit in non-coding DNA. To interpret what those variants mean, we need a way to read what regulatory machinery is at any genomic location. This walkthrough treats regulatory elements as **words**, BED-file experiments as **documents**, and uses the distributional structure of co-occurrence to build a dictionary.
 
-Four steps: **(1)** projecting raw experimental peaks onto a shared vocabulary, **(2)** the embedding as an emergent grammar, **(3)** each experiment as a partial vocabulary, and **(4)** hypothesizing about what we don't know.
+Three steps: **(1)** projecting raw experimental peaks onto a shared vocabulary, **(2)** the embedding as an emergent grammar, and **(3)** files share a dictionary — single experiments and groups both surface as intersections in the same canvas.
 
 Focus: **chromosome 16** of the human genome. Four narrative-anchoring loci to swap between.
 
 ```js
 import * as vg from "npm:@uwdata/vgplot";
-import {clausePoints} from "npm:@uwdata/mosaic-core";
+import {clausePoint, clausePoints} from "npm:@uwdata/mosaic-core";
 import {
   SCREEN_CLASS_COLORS,
   SCREEN_CLASS_COLOR_DOMAIN,
@@ -84,8 +84,7 @@ const TABLE = {
 // not materialized — it's queried lazily on selection changes.
 const tablesReady = await (async () => {
   await Promise.all([
-    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regions} AS SELECT * FROM read_parquet('${parquetUrls.regions}')`)
-      .then(() => coord.exec(`CREATE OR REPLACE VIEW ${TABLE.regionsClassed} AS SELECT * FROM ${TABLE.regions} WHERE cclass IS NOT NULL`)),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regions} AS SELECT * FROM read_parquet('${parquetUrls.regions}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.files} AS SELECT * FROM read_parquet('${parquetUrls.files}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.intervals} AS SELECT * FROM read_parquet('${parquetUrls.intervals}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredFiles} AS SELECT * FROM read_parquet('${parquetUrls.featuredFiles}')`),
@@ -94,6 +93,9 @@ const tablesReady = await (async () => {
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tokenizedCorpus} AS SELECT * FROM read_parquet('${parquetUrls.tokenizedCorpus}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredSignal} AS SELECT * FROM read_parquet('${parquetUrls.featuredSignal}')`)
   ]);
+  // Views go strictly AFTER all tables exist — chaining with `.then`
+  // inside Promise.all races against mosaic mark schema queries.
+  await coord.exec(`CREATE OR REPLACE VIEW ${TABLE.regionsClassed} AS SELECT * FROM ${TABLE.regions} WHERE cclass IS NOT NULL`);
   return true;
 })();
 ```
@@ -136,7 +138,7 @@ ${currentInterval.chrom}:${currentInterval.start.toLocaleString()}–${currentIn
 
 The thing a regulatory experiment actually outputs is a **continuous signal track** over the genome — read pileups, fold-change over background, hypersensitivity intensity. Peak callers threshold that signal to produce a **BED file**: a discrete list of intervals. Different callers, different parameters, slightly different boundaries — so two BEDs that agree biologically still don't agree at the bp.
 
-To get a fixed dictionary we **project peaks onto a universe** of regulatory regions (the [SCREEN](https://screen.encodeproject.org/) candidate cis-regulatory elements, which integrate evidence across many ENCODE experiments). Every peak collapses to whichever universe regions it overlaps, and each file becomes a binary presence vector — that's tokenization.
+To get a fixed dictionary we **project peaks onto a universe** of regulatory regions — the tokenized region universe from our [r2v-encode-hg38](https://huggingface.co/databio/r2v-encode-hg38) corpus, derived from co-activation across thousands of BED files. Every peak collapses to whichever universe regions it overlaps, and each file becomes a binary presence vector — that's tokenization. The class labels overlaid on the embedding (PLS / pELS / dELS / …) come from [SCREEN](https://screen.encodeproject.org/), a different classification system applied on top of the universe.
 
 Toggle through the three views to watch the abstraction emerge.
 
@@ -402,7 +404,7 @@ ${view1Mode === "tokens"
 
 ## 2. A learned grammar
 
-With every BED file as a binary "sentence" of universe tokens, a word2vec-style model ([Region2Vec](https://academic.oup.com/bioinformatics/article/40/2/btae073/7613064)) learns a 100-dimensional embedding per region. Regions that show up in similar files together end up close in embedding space. Project to 2D, color by SCREEN regulatory class, and the embedding has learned the dictionary on its own — promoters cluster with promoters, enhancers with enhancers.
+With every BED file as a binary "sentence" of universe tokens, a word2vec-style model (Region2Vec, part of [geniml](https://github.com/databio/geniml)) learns a 100-dimensional embedding per region. Regions that show up in similar files together end up close in embedding space. Project to 2D, color by SCREEN regulatory class, and the embedding has learned the dictionary on its own — promoters cluster with promoters, enhancers with enhancers.
 
 The neighborhoods you see here are **embedding-space** neighborhoods — regions whose 100-dim R2V vectors are close. Color by SCREEN class, genomic midpoint, or corpus-wide file count to surface different stories about the embedding.
 
@@ -423,6 +425,7 @@ const regionColorBy = view(Inputs.radio(
   {value: "class", label: "Color regions by"}
 ));
 ```
+
 
 ```js
 // Region UMAP. Chr16 tokens colored by `regionColorBy`. Tokens overlapping
@@ -450,55 +453,59 @@ const classedChr16 = regions
     n_files_total: Number(regionStatsByToken.get(r.token_id)?.n_files_total ?? 0)
   }));
 
+// Cell deliberately does NOT reference pickedTokenId — the picked-ring
+// overlay is rendered via vg.from + filterBy on pickedTokenSel, so clicks
+// don't rebuild the whole UMAP. The cell DOES depend on regionColorBy,
+// so changing the color encoding rebuilds the plot. (Param-driven fill
+// columns don't currently work with mosaic's column-format data: the
+// channel becomes a valueEntry holding the column name as a string, and
+// Plot tries `data[i].colName` on rows that don't exist.)
 const regionUmap = (() => {
+  const tokenHover = vg.Selection.single({empty: true});
   const inInterval = classedChr16.filter((r) => inIntervalSet.has(r.token_id));
-  const picked = pickedTokenId != null ? classedChr16.filter((r) => r.token_id === pickedTokenId) : [];
   const colorChannel =
     regionColorBy === "class" ? "cclass"
     : regionColorBy === "midpoint" ? "midpoint"
     : "n_files_total";
-  const colorConfig =
+  const colorDirectives =
     regionColorBy === "class"
-      ? {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true}
+      ? [vg.colorDomain(SCREEN_CLASS_COLOR_DOMAIN), vg.colorRange(SCREEN_CLASS_COLOR_RANGE)]
       : regionColorBy === "midpoint"
-        ? {scheme: "turbo", legend: true, label: "midpoint (Mb)", tickFormat: (d) => (d / 1e6).toFixed(1)}
-        : {scheme: "viridis", type: "sqrt", legend: true, label: "n files (sqrt)"};
-  const plot = Plot.plot({
-    width: 900,
-    height: 600,
-    color: colorConfig,
-    marks: [
-      Plot.dot(classedChr16, {x: "umap_x", y: "umap_y", fill: colorChannel, r: 1.4, fillOpacity: 0.55}),
-      Plot.dot(inInterval, {x: "umap_x", y: "umap_y", fill: colorChannel, stroke: "black", strokeWidth: 0.7, r: 2.4}),
-      Plot.dot(picked, {x: "umap_x", y: "umap_y", stroke: "magenta", strokeWidth: 2.5, fill: "none", r: 10}),
-      Plot.dot(
-        classedChr16,
-        Plot.pointer({
-          x: "umap_x",
-          y: "umap_y",
-          stroke: "black",
-          strokeWidth: 1.2,
-          r: 5,
-          fill: "white",
-          fillOpacity: 0.8,
-          channels: {token_id: "token_id", region: "region", cclass: "cclass", midpoint: "midpoint", n_files_total: "n_files_total"}
-        })
-      ),
-      Plot.tip(
-        classedChr16,
-        Plot.pointer({
-          x: "umap_x",
-          y: "umap_y",
-          channels: {region: "region", cclass: "cclass", token_id: "token_id", midpoint: "midpoint", n_files_total: "n_files_total"},
-          format: {x: false, y: false, region: true, cclass: true, token_id: true, midpoint: (d) => Math.round(d).toLocaleString(), n_files_total: true}
-        })
-      )
-    ]
-  });
+        ? [vg.colorScheme("turbo"), vg.colorLabel("midpoint (Mb)"), vg.colorTickFormat((d) => (d / 1e6).toFixed(1))]
+        : [vg.colorScheme("viridis"), vg.colorScale("sqrt"), vg.colorLabel("n files (sqrt)")];
+  const plot = vg.plot(
+    vg.dot(classedChr16, {
+      x: "umap_x", y: "umap_y", fill: colorChannel,
+      r: 1.4, fillOpacity: 0.55,
+      tip: true
+    }),
+    // vg.nearest must come right after the dataset it binds to —
+    // interactors attach to plot.marks[last] at the time they're added.
+    vg.nearest({as: tokenHover}),
+    vg.dot(inInterval, {
+      x: "umap_x", y: "umap_y", fill: colorChannel,
+      stroke: "black", strokeWidth: 0.7, r: 2.4
+    }),
+    vg.dot(vg.from(TABLE.regions, {filterBy: pickedTokenSel}), {
+      x: "umap_x", y: "umap_y",
+      stroke: "black", strokeWidth: 2.5, fill: "none", r: 10
+    }),
+    ...colorDirectives,
+    vg.colorLegend(),
+    vg.width(900),
+    vg.height(600)
+  );
+  plot.style.flexDirection = "column-reverse";
   plot.style.cursor = "crosshair";
   plot.addEventListener("click", () => {
-    const v = plot.value;
-    if (v && v.token_id != null) setPickedTokenId(v.token_id === pickedTokenId ? null : v.token_id);
+    const v = tokenHover.value;
+    if (!v || !v.length) return;
+    const [hx, hy] = v[0];
+    const found = classedChr16.find((d) => d.umap_x === hx && d.umap_y === hy);
+    if (!found) return;
+    const currentlyPicked = pickedTokenSel.value;
+    const newId = found.token_id === currentlyPicked ? null : found.token_id;
+    pickedTokenSel.update(clausePoint("token_id", newId, {source: pickTokenBridge}));
   });
   return plot;
 })();
@@ -510,243 +517,204 @@ ${regionUmap}
 ${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to highlight it as a focal region."}
 </div>
 
-## 3. Each experiment is a partial vocabulary
+## 3. Files share a dictionary
 
-Every BED file activates a subset of the universe — an experiment is a sentence that uses some words from the dictionary and not others. **Click any file** in the left UMAP to highlight the chr16 regions it uses on the right.
+Every BED file activates a subset of the universe — an experiment is a sentence that uses some words from the dictionary and not others. **Click a file** in the left UMAP to see exactly which chr16 regions it touches, or **click an assay or cell-line in the legend** to filter to a group of files at once. The right-hand UMAP highlights the regions shared across whatever you selected.
+
+For a single file the highlight is that experiment's full active vocabulary — the universe regions it overlaps. For a group it's the *shared core*: the regions consistently active across the members of the selection, which is where a group's biological identity lives. The class labels overlaid on the embedding (PLS / pELS / dELS / …) are coarse and fixed; the corpus contains a different signal — co-activation across files — that lets you ask "what does *this slice* of experiments agree on?"
+
+The slider sets how strict "shared" is — 1.0 is true intersection (often empty since one missing peak kills the region), 0.5 majority, 0.1 a tenth. Slide left when you want what *most* of the group agrees on, not every single file.
 
 ```js
-// Mutables holding the picked file id (Step 3) and the picked region
-// token id (Step 2 → Step 4). Other cells reference these by name to read
-// the current value; to write, call the matching setter — its closure
-// captures the real Mutable wrapper, not the auto-unwrapped value.
-const pickedFileId = Mutable(null);
-function setPickedFileId(id) {
-  pickedFileId.value = id;
-}
-// Default the focal token to the first universe token of the first
-// featured interval so Step 2's "picked" highlight is non-empty on load.
+// Shared selection state. fileSel is driven by both dot clicks (vg.toggle)
+// and legend clicks (vg.colorLegend with `as`). intersectSel is a bridge
+// target — the listener below pushes a `token_id IN (...)` clause whenever
+// the active-region intersection changes, and the right-hand UMAP filters
+// its highlight layer by it. pickedTokenSel/pickedTokenId persist for
+// Step 2's focal-token highlight.
+// Tessera pattern: separate sub-selections per input source, composed
+// into one filter via Selection.intersect({include: [...]}).
+// vg.colorLegend({as: $legendBrush}) needs the selection to hold array
+// values (its update() calls .map on the value), so we keep legend and
+// dot-click in different selections and reset them against each other.
+const $legendBrush = vg.Selection.crossfilter();
+const $fileClickBrush = vg.Selection.single({empty: true});
+// fileSel (empty: false default) drives vg.highlight — empty selection
+// = "match everything" so no dots get faded.
+const fileSel = vg.Selection.intersect({
+  include: [$legendBrush, $fileClickBrush]
+});
+// Two separate empty:true filters drive distinct highlight overlays —
+// legendFilter for legend (slightly enlarged dot, thin outline) and
+// clickFilter for dot-click (single black ring). Each is empty until its
+// respective brush has clauses.
+const legendFilter = vg.Selection.intersect({
+  empty: true,
+  include: [$legendBrush]
+});
+const clickFilter = vg.Selection.intersect({
+  empty: true,
+  include: [$fileClickBrush]
+});
+const intersectSel = vg.Selection.intersect({empty: true});
+const intersectBridge = {};
+const fileClickSrc = {};
 const pickedTokenId = Mutable(intervals[0]?.universe_token_ids?.[0] ?? null);
 function setPickedTokenId(id) {
   pickedTokenId.value = id;
 }
-```
-
-```js
-// Lazy DuckDB query: when pickedFileId changes, fetch that file's chr16
-// active tokens from the 62 MB tokenized_corpus parquet. Cold start ~5s,
-// warm queries sub-second (DuckDB-WASM caches the file).
-const activeTokenIds = await (async () => {
-  const id = pickedFileId;
-  if (!id) return [];
-  const safe = String(id).replace(/'/g, "''");
-  const result = await coord.query(
-    `SELECT chr16_active_token_ids FROM ${TABLE.tokenizedCorpus} WHERE id = '${safe}'`
+const pickedTokenSel = vg.Selection.single({empty: true});
+const pickTokenBridge = {};
+const _initialTokenId = intervals[0]?.universe_token_ids?.[0] ?? null;
+if (_initialTokenId != null) {
+  pickedTokenSel.update(
+    clausePoint("token_id", _initialTokenId, {source: pickTokenBridge})
   );
-  const rows = arrowToRows(result);
-  return rows[0]?.chr16_active_token_ids ?? [];
-})();
+}
+// Stats for the caption — populated by the intersection bridge below.
+const sectionStats = Mutable({n_files: 0, n_regions: 0, has_selection: false});
+function setSectionStats(s) { sectionStats.value = s; }
 ```
 
 ```js
-// File UMAP — clickable. All 16,794 files; click any dot to pick.
-// `Plot.pointer` puts the row under the cursor in plot.value; the click
-// handler reads that and writes to pickedFileId.
+// Bridge: pickedTokenSel → pickedTokenId Mutable. Step 2 reads the
+// Mutable for its caption.
+{
+  const handler = () => setPickedTokenId(pickedTokenSel.value ?? null);
+  pickedTokenSel.addEventListener("value", handler);
+  invalidation.then(() => pickedTokenSel.removeEventListener("value", handler));
+}
+
+// Mutual-exclusion bridge: when the legend writes a clause, clear the
+// dot-click brush. (The dot-click handler resets $legendBrush directly,
+// closing the loop in the other direction.)
+{
+  const handler = () => {
+    if (($legendBrush.clauses?.length ?? 0) > 0) $fileClickBrush.reset();
+  };
+  $legendBrush.addEventListener("value", handler);
+  invalidation.then(() => $legendBrush.removeEventListener("value", handler));
+}
+```
+
+```js
+// File UMAP. vg.nearest writes the hovered dot's [umap_x, umap_y] into
+// fileHover; the click handler matches that back to a row and pushes a
+// clausePoint("id", file_id) onto fileSel. vg.colorLegend({as: fileSel})
+// makes the embedded color legend interactive — both click sources
+// compose into the same Selection via Selection.intersect.
 const fileUmap = (() => {
-  const plot = Plot.plot({
-    width: 600,
-    height: 500,
-    color: {domain: ASSAY_COLOR_DOMAIN, range: ASSAY_COLOR_RANGE, legend: true},
-    marks: [
-      Plot.dot(filesRows, {
-        x: "umap_x",
-        y: "umap_y",
-        fill: "assay",
-        r: 1.6,
-        fillOpacity: 0.45
-      }),
-      ...(pickedFileId
-        ? [
-            Plot.dot(filesRows.filter((d) => d.id === pickedFileId), {
-              x: "umap_x",
-              y: "umap_y",
-              stroke: "magenta",
-              strokeWidth: 2,
-              r: 8,
-              fill: "none"
-            })
-          ]
-        : []),
-      Plot.dot(
-        filesRows,
-        Plot.pointer({
-          x: "umap_x",
-          y: "umap_y",
-          stroke: "black",
-          strokeWidth: 1.2,
-          r: 5,
-          fill: "white",
-          fillOpacity: 0.8,
-          channels: {id: "id", name: "name", cell_line: "cell_line", assay: "assay"}
-        })
-      ),
-      Plot.tip(
-        filesRows,
-        Plot.pointer({
-          x: "umap_x",
-          y: "umap_y",
-          channels: {file: "name", cell_line: "cell_line", assay: "assay"},
-          format: {file: true, cell_line: true, assay: true, x: false, y: false}
-        })
-      )
-    ]
-  });
+  const fileHover = vg.Selection.single({empty: true});
+  const plot = vg.plot(
+    // Base layer reads from the dict_files DuckDB table — vg.highlight
+    // requires the previous mark to expose mark.query(), which only works
+    // on table-backed marks (array-backed marks return null there).
+    vg.dot(vg.from(TABLE.files), {
+      x: "umap_x", y: "umap_y", fill: "assay",
+      r: 1.6, fillOpacity: 0.45,
+      tip: true
+    }),
+    vg.nearest({as: fileHover}),
+    // Fades non-selected dots — vg.highlight modifies DOM directly (instant).
+    vg.highlight({by: fileSel, opacity: 0.08}),
+    // Legend selection — slightly enlarged filled dots with thin outline.
+    vg.dot(vg.from(TABLE.files, {filterBy: legendFilter}), {
+      x: "umap_x", y: "umap_y", fill: "assay",
+      r: 2.5, fillOpacity: 1, stroke: "black", strokeWidth: 0.4
+    }),
+    // Single-dot click — Step 2-style black ring around the picked file.
+    vg.dot(vg.from(TABLE.files, {filterBy: clickFilter}), {
+      x: "umap_x", y: "umap_y",
+      stroke: "black", strokeWidth: 2.5, fill: "none", r: 10
+    }),
+    vg.colorDomain(ASSAY_COLOR_DOMAIN),
+    vg.colorRange(ASSAY_COLOR_RANGE),
+    vg.colorLegend({as: $legendBrush}),
+    vg.width(600),
+    vg.height(500)
+  );
+  plot.style.flexDirection = "column-reverse";
   plot.style.cursor = "crosshair";
-  plot.addEventListener("click", () => {
-    const v = plot.value;
-    if (v && v.id != null) setPickedFileId(v.id === pickedFileId ? null : v.id);
+  plot.addEventListener("click", (e) => {
+    // Skip clicks on the embedded color legend (outside the SVG) so they
+    // don't double-write a stale id clause on top of the legend's assay
+    // clause.
+    const svg = plot.querySelector("svg");
+    if (!svg || !svg.contains(e.target)) return;
+    const v = fileHover.value;
+    if (!v || !v.length) return;
+    const [hx, hy] = v[0];
+    const found = filesRows.find((d) => d.umap_x === hx && d.umap_y === hy);
+    if (!found) return;
+    // Clear legend, then write the file-click clause to its own brush.
+    $legendBrush.reset();
+    $fileClickBrush.update({
+      source: fileClickSrc,
+      value: found.id,
+      predicate: vg.eq(vg.column("id"), vg.literal(found.id))
+    });
   });
   return plot;
 })();
 ```
 
 ```js
-// Region UMAP — chr16 tokens; tokens active in the picked file are
-// highlighted (larger, outlined) over a faded background.
-const classedRegions = regions.filter((r) => r.cclass !== null);
-const activeTokenSet = new Set(activeTokenIds);
-const inactiveDots = classedRegions.filter((d) => !activeTokenSet.has(d.token_id));
-const activeDots = classedRegions.filter((d) => activeTokenSet.has(d.token_id));
-
-const regionUmapHighlight = Plot.plot({
-  width: 600,
-  height: 500,
-  color: {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true},
-  marks: [
-    Plot.dot(inactiveDots, {
-      x: "umap_x",
-      y: "umap_y",
-      fill: "cclass",
-      r: 1,
-      opacity: pickedFileId ? 0.1 : 0.55
-    }),
-    Plot.dot(activeDots, {
-      x: "umap_x",
-      y: "umap_y",
-      fill: "cclass",
-      stroke: "black",
-      strokeWidth: 0.4,
-      r: 2.5,
-      opacity: 0.95
-    })
-  ]
-});
-```
-
-```js
-// Caption: file metadata + activation count for the picked file.
-const pickedFileMeta = pickedFileId ? filesRows.find((d) => d.id === pickedFileId) : null;
-const cleanField = (s) => (s && s !== "UNKNOWN" ? s : "");
-const pickedFileCaption = pickedFileMeta
-  ? `${pickedFileMeta.assay} · ${cleanField(pickedFileMeta.cell_line) || "—"}${cleanField(pickedFileMeta.cell_type) ? " (" + cleanField(pickedFileMeta.cell_type) + ")" : ""} · ${activeTokenIds.length.toLocaleString()} chr16 tokens active. ${pickedFileMeta.name}`
-  : "Click a file in the left UMAP to highlight its chr16 token activations on the right.";
-```
-
-<div style="display: flex; gap: 16px; flex-wrap: wrap;">
-  <div>${fileUmap}</div>
-  <div>${regionUmapHighlight}</div>
-</div>
-
-<div style="font-size: 0.85em; color: #666;">${pickedFileCaption}</div>
-
-## 4. What defines a group of experiments?
-
-The dictionary's class labels are coarse and fixed. The corpus contains a different signal: each BED file activates a subset of the universe, so a group of files implies a *voice* — a subset of regions that's over-represented in the group relative to the full corpus.
-
-Drag a rectangle on the file UMAP, or click an assay in the legend, to define a selection. The right-hand UMAP highlights the top-30 chr16 regions ranked by **differential frequency**: `P(active | selection) − P(active | corpus)`. The metric surfaces what makes the selected files *coherent* rather than the housekeeping regions everyone shares.
-
-```js
-// File-side selection composes brush + legend toggles.
-// Region-side selection is a bridge target: the listener below pushes a
-// `token_id IN (...)` clause whenever the differential top-30 changes,
-// and the right-hand UMAP filters its highlight layer by it.
-const fileSel = vg.Selection.intersect({empty: true});
-const top30Sel = vg.Selection.intersect({empty: true});
-// Object identity for the bridge clause's source — keeps successive
-// updates de-duplicated against earlier ones.
-const top30BridgeSource = {};
-```
-
-```js
-// File UMAP. `vg.intervalXY` adds drag-rectangle selection;
-// `vg.toggleColor` turns the embedded color legend into a click-to-filter.
-const fileUmapBrush = vg.plot(
-  vg.dot(
-    vg.from(TABLE.files),
-    {x: "umap_x", y: "umap_y", fill: "assay", r: 1.4, fillOpacity: 0.45}
-  ),
-  vg.dot(
-    vg.from(TABLE.files, {filterBy: fileSel}),
-    {x: "umap_x", y: "umap_y", fill: "assay", r: 2.5, fillOpacity: 1, stroke: "black", strokeWidth: 0.4}
-  ),
-  // vg.intervalXY({as: fileSel}),  // drag-select disabled for now — legend only
-  vg.colorDomain(ASSAY_COLOR_DOMAIN),
-  vg.colorRange(ASSAY_COLOR_RANGE),
-  // Pass `as: fileSel` to make the legend itself click-to-filter
-  // (toggleColor is for clicks ON DOTS, not on the legend).
-  vg.colorLegend({as: fileSel}),
-  vg.width(600),
-  vg.height(500),
-  vg.marginTop(40)
-);
-// vgplot defaults the plot wrapper to flex-row, putting the legend in
-// its own column to the right. Stack the legend on top instead
-// (column-reverse: svg renders below legend).
-fileUmapBrush.style.flexDirection = "column-reverse";
-```
-
-```js
-// Region UMAP — same chr16 layout as Step 2. Background layer renders
-// every classed token at low opacity; highlight layer is filterBy: top30Sel
-// so it reactively re-renders as the bridge updates the clause. Reads
-// from the dict_regions_classed view (registered in setup) — passing a
-// SQL subquery string to vg.from doesn't work; only table/view names do.
-const top30RegionPlot = vg.plot(
-  vg.dot(
-    vg.from(TABLE.regionsClassed),
-    {x: "umap_x", y: "umap_y", fill: "cclass", r: 1, fillOpacity: 0.08}
-  ),
-  vg.dot(
-    vg.from(TABLE.regionsClassed, {filterBy: top30Sel}),
-    {x: "umap_x", y: "umap_y", fill: "cclass", r: 4, stroke: "black", strokeWidth: 0.6}
-  ),
+// Region UMAP — chr16 tokens. Background = faded full scatter; highlight
+// layer is filterBy: intersectSel which the bridge populates with the
+// intersection of active regions across the file selection.
+const intersectionRegionPlot = vg.plot(
+  vg.dot(classedChr16, {
+    x: "umap_x", y: "umap_y", fill: "cclass", r: 1, fillOpacity: 0.1
+  }),
+  vg.dot(vg.from(TABLE.regions, {filterBy: intersectSel}), {
+    x: "umap_x", y: "umap_y", fill: "cclass",
+    r: 3, stroke: "black", strokeWidth: 0.5, opacity: 0.95,
+    tip: true
+  }),
   vg.colorDomain(SCREEN_CLASS_COLOR_DOMAIN),
   vg.colorRange(SCREEN_CLASS_COLOR_RANGE),
   vg.colorLegend(),
   vg.width(600),
-  vg.height(500),
-  vg.marginTop(40)
+  vg.height(500)
 );
-top30RegionPlot.style.flexDirection = "column-reverse";
+intersectionRegionPlot.style.flexDirection = "column-reverse";
 ```
 
 ```js
-// Bridge: listen to fileSel, run the differential top-30 aggregation in
-// DuckDB, push the resulting token_ids into top30Sel as a single
-// `clausePoints` clause. vg.sql can't reactively interpolate Selection
-// predicates inside a CTE, and our query is multi-CTE (UNNEST + GROUP BY
-// + JOIN), so the imperative bridge is the cleanest path.
+// Threshold slider: regions must be active in ≥ this fraction of the
+// selected files. 1.0 = strict intersection (often empty for big groups);
+// 0.5 = majority; 0 = anything-goes (top of the activity distribution).
+const minFrac = view(Inputs.range([0, 1], {
+  step: 0.01,
+  value: 0.1,
+  label: "Min fraction of selection active"
+}));
+```
+
+```js
+// Bridge: when fileSel or minFrac changes, run the threshold-frequency
+// query in DuckDB and push the resulting token_ids onto intersectSel.
+// HAVING COUNT(*) >= CEIL(N * minFrac) — at minFrac=1 this collapses to
+// strict intersection; lower values yield a majority/plurality core.
+// Capped at 5000 to keep clause size sane on permissive thresholds.
 {
-  const corpusSize = filesRows.length;
   const stringifyPredicate = (p) => {
-    if (!p) return "TRUE";
+    if (!p) return null;
     const arr = Array.isArray(p) ? p : [p];
     const parts = arr.filter(Boolean).map((x) => `(${String(x)})`);
-    return parts.length ? parts.join(" AND ") : "TRUE";
+    return parts.length ? parts.join(" AND ") : null;
   };
   const handler = async () => {
+    const hasSelection = (fileSel.clauses?.length ?? 0) > 0;
+    if (!hasSelection) {
+      intersectSel.update(clausePoints(["token_id"], [], {source: intersectBridge}));
+      setSectionStats({n_files: 0, n_regions: 0, has_selection: false});
+      return;
+    }
     const where = stringifyPredicate(fileSel.predicate());
-    if (where === "TRUE") {
-      top30Sel.update(clausePoints(["token_id"], [], {source: top30BridgeSource}));
+    if (!where) {
+      intersectSel.update(clausePoints(["token_id"], [], {source: intersectBridge}));
+      setSectionStats({n_files: 0, n_regions: 0, has_selection: false});
       return;
     }
     const sizeRes = await coord.query(
@@ -754,42 +722,43 @@ top30RegionPlot.style.flexDirection = "column-reverse";
     );
     const n = Number(arrowToRows(sizeRes)[0].n);
     if (n === 0) {
-      top30Sel.update(clausePoints(["token_id"], [], {source: top30BridgeSource}));
+      intersectSel.update(clausePoints(["token_id"], [], {source: intersectBridge}));
+      setSectionStats({n_files: 0, n_regions: 0, has_selection: true});
       return;
     }
-    const top30Res = await coord.query(`
+    const cutoff = Math.max(1, Math.ceil(n * minFrac));
+    const result = await coord.query(`
       WITH sel_files AS (SELECT id FROM ${TABLE.files} WHERE ${where}),
       sel_active AS (
         SELECT UNNEST(chr16_active_token_ids) AS token_id
         FROM ${TABLE.tokenizedCorpus}
         WHERE id IN (SELECT id FROM sel_files)
-      ),
-      sel_counts AS (
-        SELECT token_id, COUNT(*) AS n_in_S
-        FROM sel_active
-        GROUP BY token_id
       )
-      SELECT s.token_id,
-             (s.n_in_S * 1.0 / ${n}) - (rs.n_files_total * 1.0 / ${corpusSize}) AS diff
-      FROM sel_counts s
-      JOIN ${TABLE.regionStats} rs USING (token_id)
-      JOIN ${TABLE.regions} viz USING (token_id)
-      WHERE viz.cclass IS NOT NULL
-      ORDER BY diff DESC LIMIT 30
+      SELECT token_id
+      FROM sel_active
+      GROUP BY token_id
+      HAVING COUNT(*) >= ${cutoff}
+      LIMIT 5000
     `);
-    const ids = arrowToRows(top30Res).map((r) => [Number(r.token_id)]);
-    top30Sel.update(clausePoints(["token_id"], ids, {source: top30BridgeSource}));
+    const ids = arrowToRows(result).map((r) => [Number(r.token_id)]);
+    intersectSel.update(clausePoints(["token_id"], ids, {source: intersectBridge}));
+    setSectionStats({n_files: n, n_regions: ids.length, has_selection: true, min_frac: minFrac});
   };
   fileSel.addEventListener("value", handler);
   invalidation.then(() => fileSel.removeEventListener("value", handler));
+  // Fire once on cell run so threshold changes update the plot immediately
+  // (without waiting for a fileSel change).
+  handler();
 }
 ```
 
 <div style="display: flex; gap: 16px; align-items: flex-start;">
-  <div style="flex: 0 0 auto;">${fileUmapBrush}</div>
-  <div style="flex: 0 0 auto;">${top30RegionPlot}</div>
+  <div style="flex: 0 0 auto;">${fileUmap}</div>
+  <div style="flex: 0 0 auto;">${intersectionRegionPlot}</div>
 </div>
 
 <div style="font-size: 0.85em; color: #666;">
-Drag on the file UMAP or click an assay in the legend to define a selection. The right plot highlights the top 30 chr16 regions by P(active&nbsp;|&nbsp;selection)&nbsp;−&nbsp;P(active&nbsp;|&nbsp;corpus).
+${sectionStats.has_selection
+  ? `${sectionStats.n_files.toLocaleString()} ${sectionStats.n_files === 1 ? "file" : "files"} selected. ${sectionStats.n_regions.toLocaleString()} chr16 regions active in ≥ ${Math.round((sectionStats.min_frac ?? 1) * 100)}% of them.`
+  : "Click a file or an assay in the legend to define a selection."}
 </div>
