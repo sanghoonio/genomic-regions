@@ -23,6 +23,7 @@ Focus: **chromosome 16** of the human genome. Four narrative-anchoring loci to s
 
 ```js
 import * as vg from "npm:@uwdata/vgplot";
+import {clausePoints} from "npm:@uwdata/mosaic-core";
 import {
   SCREEN_CLASS_COLORS,
   SCREEN_CLASS_COLOR_DOMAIN,
@@ -56,7 +57,6 @@ const parquetUrls = {
   featuredFiles: await FileAttachment("data/dictionary/featured_files.parquet").href,
   tracks: await FileAttachment("data/dictionary/featured_tracks.parquet").href,
   regionStats: await FileAttachment("data/dictionary/region_stats.parquet").href,
-  cooccurrence: await FileAttachment("data/dictionary/region_cooccurrence.parquet").href,
   tokenizedCorpus: await FileAttachment("data/dictionary/tokenized_corpus_chr16.parquet").href,
   featuredSignal: await FileAttachment("data/dictionary/featured_signal.parquet").href
 };
@@ -71,8 +71,8 @@ const TABLE = {
   featuredFiles: "dict_featured_files",
   tracks: "dict_featured_tracks",
   regionStats: "dict_region_stats",
-  cooccurrence: "dict_cooccurrence",
   tokenizedCorpus: "dict_tokenized_corpus",
+  regionsClassed: "dict_regions_classed",
   featuredSignal: "dict_featured_signal"
 };
 ```
@@ -80,17 +80,17 @@ const TABLE = {
 ```js
 // Register each parquet as a DuckDB table. The `tablesReady` export gates
 // every downstream query/plot — anything that wants the data must read
-// `tablesReady`. Big tables (cooccurrence, tokenized_corpus) are registered
-// here but not materialized — they're queried lazily on user interaction.
+// `tablesReady`. The big tokenized_corpus table is registered here but
+// not materialized — it's queried lazily on selection changes.
 const tablesReady = await (async () => {
   await Promise.all([
-    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regions} AS SELECT * FROM read_parquet('${parquetUrls.regions}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regions} AS SELECT * FROM read_parquet('${parquetUrls.regions}')`)
+      .then(() => coord.exec(`CREATE OR REPLACE VIEW ${TABLE.regionsClassed} AS SELECT * FROM ${TABLE.regions} WHERE cclass IS NOT NULL`)),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.files} AS SELECT * FROM read_parquet('${parquetUrls.files}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.intervals} AS SELECT * FROM read_parquet('${parquetUrls.intervals}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredFiles} AS SELECT * FROM read_parquet('${parquetUrls.featuredFiles}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tracks} AS SELECT * FROM read_parquet('${parquetUrls.tracks}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regionStats} AS SELECT * FROM read_parquet('${parquetUrls.regionStats}')`),
-    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.cooccurrence} AS SELECT * FROM read_parquet('${parquetUrls.cooccurrence}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tokenizedCorpus} AS SELECT * FROM read_parquet('${parquetUrls.tokenizedCorpus}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredSignal} AS SELECT * FROM read_parquet('${parquetUrls.featuredSignal}')`)
   ]);
@@ -99,9 +99,9 @@ const tablesReady = await (async () => {
 ```
 
 ```js
-// Materialize the small / always-needed tables into JS arrays. The two
-// large tables (cooccurrence, tokenized_corpus) stay in DuckDB and are
-// queried by file_id / token_id when the user clicks something.
+// Materialize the small / always-needed tables into JS arrays. The
+// tokenized_corpus table stays in DuckDB and is queried by file_id when
+// the user changes the brush/legend selection in Step 4.
 tablesReady;
 const intervals = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.intervals}`));
 const featuredFiles = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.featuredFiles}`));
@@ -404,13 +404,30 @@ ${view1Mode === "tokens"
 
 With every BED file as a binary "sentence" of universe tokens, a word2vec-style model ([Region2Vec](https://academic.oup.com/bioinformatics/article/40/2/btae073/7613064)) learns a 100-dimensional embedding per region. Regions that show up in similar files together end up close in embedding space. Project to 2D, color by SCREEN regulatory class, and the embedding has learned the dictionary on its own — promoters cluster with promoters, enhancers with enhancers.
 
-The neighborhoods you see here are **embedding-space** neighborhoods — regions whose 100-dim R2V vectors are close. That's a stronger statement than "regions that happen to co-occur in BED files," which is what Step 4's cooccurrence panel below will show. The two views agree most of the time but disagree in interesting places.
+The neighborhoods you see here are **embedding-space** neighborhoods — regions whose 100-dim R2V vectors are close. Color by SCREEN class, genomic midpoint, or corpus-wide file count to surface different stories about the embedding.
 
 ```js
-// Region UMAP. Chr16 tokens colored by SCREEN class. Tokens overlapping
+// Color encoding toggle for the region UMAP.
+//   "class"    — SCREEN regulatory class (the dictionary itself).
+//   "midpoint" — genomic midpoint (mean of start/end). Surfaces whether
+//                spatial neighbors on chr16 land near each other in the
+//                embedding.
+//   "files"    — n_files_total from region_stats. Surfaces housekeeping
+//                vs. cell-type-specific tokens.
+const regionColorBy = view(Inputs.radio(
+  new Map([
+    ["SCREEN class", "class"],
+    ["Genomic midpoint", "midpoint"],
+    ["File count (log)", "files"]
+  ]),
+  {value: "class", label: "Color regions by"}
+));
+```
+
+```js
+// Region UMAP. Chr16 tokens colored by `regionColorBy`. Tokens overlapping
 // the currently picked featured interval are outlined to tie back to Step 1.
-// Click any dot to pick a focal region — the cooccurrence panel in Step 4 (last section)
-// reads from the same `pickedTokenId` Mutable.
+// Click any dot to highlight it as a focal region.
 const inIntervalSet = new Set(
   regions
     .filter(
@@ -422,18 +439,37 @@ const inIntervalSet = new Set(
     )
     .map((r) => r.token_id)
 );
-const classedChr16 = regions.filter((r) => r.cclass !== null);
+// Augment chr16 tokens with derived encodings (midpoint, file count) so
+// any of the three color modes can read straight off a dot's row.
+const regionStatsByToken = new Map(regionStats.map((s) => [s.token_id, s]));
+const classedChr16 = regions
+  .filter((r) => r.cclass !== null)
+  .map((r) => ({
+    ...r,
+    midpoint: (Number(r.start) + Number(r.end)) / 2,
+    n_files_total: Number(regionStatsByToken.get(r.token_id)?.n_files_total ?? 0)
+  }));
 
 const regionUmap = (() => {
   const inInterval = classedChr16.filter((r) => inIntervalSet.has(r.token_id));
   const picked = pickedTokenId != null ? classedChr16.filter((r) => r.token_id === pickedTokenId) : [];
+  const colorChannel =
+    regionColorBy === "class" ? "cclass"
+    : regionColorBy === "midpoint" ? "midpoint"
+    : "n_files_total";
+  const colorConfig =
+    regionColorBy === "class"
+      ? {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true}
+      : regionColorBy === "midpoint"
+        ? {scheme: "turbo", legend: true, label: "midpoint (Mb)", tickFormat: (d) => (d / 1e6).toFixed(1)}
+        : {scheme: "viridis", type: "sqrt", legend: true, label: "n files (sqrt)"};
   const plot = Plot.plot({
     width: 900,
     height: 600,
-    color: {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true},
+    color: colorConfig,
     marks: [
-      Plot.dot(classedChr16, {x: "umap_x", y: "umap_y", fill: "cclass", r: 1.4, fillOpacity: 0.55}),
-      Plot.dot(inInterval, {x: "umap_x", y: "umap_y", fill: "cclass", stroke: "black", strokeWidth: 0.7, r: 2.4}),
+      Plot.dot(classedChr16, {x: "umap_x", y: "umap_y", fill: colorChannel, r: 1.4, fillOpacity: 0.55}),
+      Plot.dot(inInterval, {x: "umap_x", y: "umap_y", fill: colorChannel, stroke: "black", strokeWidth: 0.7, r: 2.4}),
       Plot.dot(picked, {x: "umap_x", y: "umap_y", stroke: "magenta", strokeWidth: 2.5, fill: "none", r: 10}),
       Plot.dot(
         classedChr16,
@@ -445,7 +481,7 @@ const regionUmap = (() => {
           r: 5,
           fill: "white",
           fillOpacity: 0.8,
-          channels: {token_id: "token_id", region: "region", cclass: "cclass"}
+          channels: {token_id: "token_id", region: "region", cclass: "cclass", midpoint: "midpoint", n_files_total: "n_files_total"}
         })
       ),
       Plot.tip(
@@ -453,8 +489,8 @@ const regionUmap = (() => {
         Plot.pointer({
           x: "umap_x",
           y: "umap_y",
-          channels: {region: "region", cclass: "cclass", token_id: "token_id"},
-          format: {x: false, y: false, region: true, cclass: true, token_id: true}
+          channels: {region: "region", cclass: "cclass", token_id: "token_id", midpoint: "midpoint", n_files_total: "n_files_total"},
+          format: {x: false, y: false, region: true, cclass: true, token_id: true, midpoint: (d) => Math.round(d).toLocaleString(), n_files_total: true}
         })
       )
     ]
@@ -471,7 +507,7 @@ const regionUmap = (() => {
 ${regionUmap}
 
 <div style="font-size: 0.85em; color: #666; margin-top: -0.5em;">
-${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to pick a focal region for the cooccurrence panel in Step 4."}
+${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to highlight it as a focal region."}
 </div>
 
 ## 3. Each experiment is a partial vocabulary
@@ -488,8 +524,7 @@ function setPickedFileId(id) {
   pickedFileId.value = id;
 }
 // Default the focal token to the first universe token of the first
-// featured interval — gives Step 4 (cooccurrence) something meaningful to render on
-// first load instead of a flat placeholder.
+// featured interval so Step 2's "picked" highlight is non-empty on load.
 const pickedTokenId = Mutable(intervals[0]?.universe_token_ids?.[0] ?? null);
 function setPickedTokenId(id) {
   pickedTokenId.value = id;
@@ -623,127 +658,138 @@ const pickedFileCaption = pickedFileMeta
 
 <div style="font-size: 0.85em; color: #666;">${pickedFileCaption}</div>
 
-## 4. Hypothesizing about what we don't know
+## 4. What defines a group of experiments?
 
-The dictionary's class labels (PLS / pELS / dELS / ...) come from SCREEN's integrative ENCODE analysis. They cover a lot but are coarse — and they don't say what *context* a region operates in. The corpus itself contains evidence: every BED file activates a subset of the universe, so co-activation across files is a measurable signal of "these regions go together." This is a different question from Step 2's embedding-similarity — and the difference is exactly what makes contextual models like Atacformer interesting.
+The dictionary's class labels are coarse and fixed. The corpus contains a different signal: each BED file activates a subset of the universe, so a group of files implies a *voice* — a subset of regions that's over-represented in the group relative to the full corpus.
 
-For a clicked region, this panel pulls its top-30 cooccurrence partners (by Jaccard similarity in the chosen context) from the corpus and lays them on the region UMAP. Edges show which partners are spatially close in the embedding (the Step-3 view) and which aren't.
+Drag a rectangle on the file UMAP, or click an assay in the legend, to define a selection. The right-hand UMAP highlights the top-30 chr16 regions ranked by **differential frequency**: `P(active | selection) − P(active | corpus)`. The metric surfaces what makes the selected files *coherent* rather than the housekeeping regions everyone shares.
 
 ```js
-const cooccurContext = view(Inputs.select(
-  ["all", "K562", "GM12878", "HepG2"],
-  {label: "Cooccurrence context", value: "all"}
-));
+// File-side selection composes brush + legend toggles.
+// Region-side selection is a bridge target: the listener below pushes a
+// `token_id IN (...)` clause whenever the differential top-30 changes,
+// and the right-hand UMAP filters its highlight layer by it.
+const fileSel = vg.Selection.intersect({empty: true});
+const top30Sel = vg.Selection.intersect({empty: true});
+// Object identity for the bridge clause's source — keeps successive
+// updates de-duplicated against earlier ones.
+const top30BridgeSource = {};
 ```
 
 ```js
-// Lazy DuckDB query for the top-30 cooccurrence partners of the picked
-// token in the chosen context. Runs only when both inputs are set.
-const egoPartners = await (async () => {
-  if (pickedTokenId == null) return null;
-  const safeCtx = String(cooccurContext).replace(/'/g, "''");
-  const result = await coord.query(
-    `SELECT token_id, n_files_active, partner_token_ids, weights_jaccard, counts
-     FROM ${TABLE.cooccurrence}
-     WHERE token_id = ${Number(pickedTokenId)} AND context = '${safeCtx}'`
-  );
-  const rows = arrowToRows(result);
-  return rows[0] ?? null;
-})();
+// File UMAP. `vg.intervalXY` adds drag-rectangle selection;
+// `vg.toggleColor` turns the embedded color legend into a click-to-filter.
+const fileUmapBrush = vg.plot(
+  vg.dot(
+    vg.from(TABLE.files),
+    {x: "umap_x", y: "umap_y", fill: "assay", r: 1.4, fillOpacity: 0.45}
+  ),
+  vg.dot(
+    vg.from(TABLE.files, {filterBy: fileSel}),
+    {x: "umap_x", y: "umap_y", fill: "assay", r: 2.5, fillOpacity: 1, stroke: "black", strokeWidth: 0.4}
+  ),
+  // vg.intervalXY({as: fileSel}),  // drag-select disabled for now — legend only
+  vg.colorDomain(ASSAY_COLOR_DOMAIN),
+  vg.colorRange(ASSAY_COLOR_RANGE),
+  // Pass `as: fileSel` to make the legend itself click-to-filter
+  // (toggleColor is for clicks ON DOTS, not on the legend).
+  vg.colorLegend({as: fileSel}),
+  vg.width(600),
+  vg.height(500),
+  vg.marginTop(40)
+);
+// vgplot defaults the plot wrapper to flex-row, putting the legend in
+// its own column to the right. Stack the legend on top instead
+// (column-reverse: svg renders below legend).
+fileUmapBrush.style.flexDirection = "column-reverse";
 ```
 
 ```js
-// Ego network rendered ONTO the region UMAP. Background = faded Step-3
-// scatter, focal = magenta ring, partners = colored + sized by Jaccard,
-// edges = focal→partner with stroke width = Jaccard. Cooccurrence partners
-// that cluster spatially with the focal token are also embedding-similar;
-// scattered partners are corpus-co-active despite *not* being embedding
-// neighbors — those are the interesting cases.
-const egoNetwork = (() => {
-  if (pickedTokenId == null) {
-    return html`<div style="padding: 1em; color: #666; border: 1px dashed #aaa; border-radius: 4px;">
-      Click a token in the Step 2 UMAP to see its cooccurrence partners.
-    </div>`;
-  }
-  if (!egoPartners) {
-    return html`<div style="padding: 1em; color: #888;">No cooccurrence row for token ${pickedTokenId} in context "${cooccurContext}".</div>`;
-  }
-  const focal = classedChr16.find((r) => r.token_id === pickedTokenId)
-    ?? regions.find((r) => r.token_id === pickedTokenId);
-  if (!focal) {
-    return html`<div style="padding: 1em; color: #888;">Token ${pickedTokenId} not in chr16 universe.</div>`;
-  }
-  const tokenLookup = new Map(regions.map((r) => [r.token_id, r]));
-  const edges = egoPartners.partner_token_ids.map((pid, i) => {
-    const p = tokenLookup.get(pid);
-    if (!p) return null;
-    return {
-      partner_id: pid,
-      weight: egoPartners.weights_jaccard[i],
-      count: egoPartners.counts[i],
-      partner_x: p.umap_x,
-      partner_y: p.umap_y,
-      cclass: p.cclass,
-      region: p.region,
-      focal_x: focal.umap_x,
-      focal_y: focal.umap_y
-    };
-  }).filter(Boolean);
-
-  return Plot.plot({
-    width: 900,
-    height: 600,
-    color: {domain: SCREEN_CLASS_COLOR_DOMAIN, range: SCREEN_CLASS_COLOR_RANGE, legend: true},
-    marks: [
-      Plot.dot(classedChr16, {x: "umap_x", y: "umap_y", fill: "cclass", r: 1, opacity: 0.08}),
-      Plot.link(edges, {
-        x1: "focal_x", y1: "focal_y",
-        x2: "partner_x", y2: "partner_y",
-        stroke: "#444",
-        strokeOpacity: 0.5,
-        strokeWidth: (d) => 0.5 + d.weight * 7
-      }),
-      Plot.dot(edges, {
-        x: "partner_x",
-        y: "partner_y",
-        fill: "cclass",
-        stroke: "black",
-        strokeWidth: 0.5,
-        r: (d) => 3 + d.weight * 8,
-        title: (d) => `${d.region}\n${d.cclass ?? "(no class)"}\nJaccard: ${d.weight.toFixed(3)}\nCo-active in ${d.count} files`
-      }),
-      Plot.dot([focal], {
-        x: "umap_x",
-        y: "umap_y",
-        stroke: "magenta",
-        strokeWidth: 2.5,
-        fill: "white",
-        r: 11
-      }),
-      Plot.text([focal], {
-        x: "umap_x",
-        y: "umap_y",
-        text: () => "★",
-        fill: "magenta",
-        fontSize: 14,
-        textAnchor: "middle"
-      })
-    ]
-  });
-})();
+// Region UMAP — same chr16 layout as Step 2. Background layer renders
+// every classed token at low opacity; highlight layer is filterBy: top30Sel
+// so it reactively re-renders as the bridge updates the clause. Reads
+// from the dict_regions_classed view (registered in setup) — passing a
+// SQL subquery string to vg.from doesn't work; only table/view names do.
+const top30RegionPlot = vg.plot(
+  vg.dot(
+    vg.from(TABLE.regionsClassed),
+    {x: "umap_x", y: "umap_y", fill: "cclass", r: 1, fillOpacity: 0.08}
+  ),
+  vg.dot(
+    vg.from(TABLE.regionsClassed, {filterBy: top30Sel}),
+    {x: "umap_x", y: "umap_y", fill: "cclass", r: 4, stroke: "black", strokeWidth: 0.6}
+  ),
+  vg.colorDomain(SCREEN_CLASS_COLOR_DOMAIN),
+  vg.colorRange(SCREEN_CLASS_COLOR_RANGE),
+  vg.colorLegend(),
+  vg.width(600),
+  vg.height(500),
+  vg.marginTop(40)
+);
+top30RegionPlot.style.flexDirection = "column-reverse";
 ```
 
-${egoNetwork}
+```js
+// Bridge: listen to fileSel, run the differential top-30 aggregation in
+// DuckDB, push the resulting token_ids into top30Sel as a single
+// `clausePoints` clause. vg.sql can't reactively interpolate Selection
+// predicates inside a CTE, and our query is multi-CTE (UNNEST + GROUP BY
+// + JOIN), so the imperative bridge is the cleanest path.
+{
+  const corpusSize = filesRows.length;
+  const stringifyPredicate = (p) => {
+    if (!p) return "TRUE";
+    const arr = Array.isArray(p) ? p : [p];
+    const parts = arr.filter(Boolean).map((x) => `(${String(x)})`);
+    return parts.length ? parts.join(" AND ") : "TRUE";
+  };
+  const handler = async () => {
+    const where = stringifyPredicate(fileSel.predicate());
+    if (where === "TRUE") {
+      top30Sel.update(clausePoints(["token_id"], [], {source: top30BridgeSource}));
+      return;
+    }
+    const sizeRes = await coord.query(
+      `SELECT COUNT(*)::INTEGER AS n FROM ${TABLE.files} WHERE ${where}`
+    );
+    const n = Number(arrowToRows(sizeRes)[0].n);
+    if (n === 0) {
+      top30Sel.update(clausePoints(["token_id"], [], {source: top30BridgeSource}));
+      return;
+    }
+    const top30Res = await coord.query(`
+      WITH sel_files AS (SELECT id FROM ${TABLE.files} WHERE ${where}),
+      sel_active AS (
+        SELECT UNNEST(chr16_active_token_ids) AS token_id
+        FROM ${TABLE.tokenizedCorpus}
+        WHERE id IN (SELECT id FROM sel_files)
+      ),
+      sel_counts AS (
+        SELECT token_id, COUNT(*) AS n_in_S
+        FROM sel_active
+        GROUP BY token_id
+      )
+      SELECT s.token_id,
+             (s.n_in_S * 1.0 / ${n}) - (rs.n_files_total * 1.0 / ${corpusSize}) AS diff
+      FROM sel_counts s
+      JOIN ${TABLE.regionStats} rs USING (token_id)
+      JOIN ${TABLE.regions} viz USING (token_id)
+      WHERE viz.cclass IS NOT NULL
+      ORDER BY diff DESC LIMIT 30
+    `);
+    const ids = arrowToRows(top30Res).map((r) => [Number(r.token_id)]);
+    top30Sel.update(clausePoints(["token_id"], ids, {source: top30BridgeSource}));
+  };
+  fileSel.addEventListener("value", handler);
+  invalidation.then(() => fileSel.removeEventListener("value", handler));
+}
+```
 
-<div style="font-size: 0.85em; color: #666; margin-top: -0.5em;">
-${pickedTokenId != null && egoPartners
-  ? `Focal token <strong>${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? pickedTokenId}</strong> is active in ${Number(egoPartners.n_files_active).toLocaleString()} ${cooccurContext === "all" ? "files" : cooccurContext + " files"}. Showing its top ${egoPartners.partner_token_ids.length} Jaccard partners.`
-  : ""}
+<div style="display: flex; gap: 16px; align-items: flex-start;">
+  <div style="flex: 0 0 auto;">${fileUmapBrush}</div>
+  <div style="flex: 0 0 auto;">${top30RegionPlot}</div>
 </div>
 
-<details>
-<summary style="cursor: pointer; color: #555;">Why per-context contrast?</summary>
-<div style="margin-top: 0.5em; color: #555;">
-Switch the context selector across <code>K562</code> / <code>GM12878</code> / <code>HepG2</code>: a region's cooccurrence neighbors usually shift, sometimes dramatically. That shift is exactly what cell-type-specific regulatory models (Atacformer-style) capture and what context-blind models (vanilla R2V) collapse — Jaccard partners that are stable across contexts vs. those that aren't tell you which regions have universal grammar and which have cell-type-specific grammar.
+<div style="font-size: 0.85em; color: #666;">
+Drag on the file UMAP or click an assay in the legend to define a selection. The right plot highlights the top 30 chr16 regions by P(active&nbsp;|&nbsp;selection)&nbsp;−&nbsp;P(active&nbsp;|&nbsp;corpus).
 </div>
-</details>
