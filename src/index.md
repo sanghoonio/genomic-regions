@@ -58,7 +58,15 @@ const parquetUrls = {
   tracks: await FileAttachment("data/dictionary/featured_tracks.parquet").href,
   regionStats: await FileAttachment("data/dictionary/region_stats.parquet").href,
   tokenizedCorpus: await FileAttachment("data/dictionary/tokenized_corpus_chr16.parquet").href,
-  featuredSignal: await FileAttachment("data/dictionary/featured_signal.parquet").href
+  featuredSignal: await FileAttachment("data/dictionary/featured_signal.parquet").href,
+  // New (2026-04-28): dictionary-entry data layer.
+  cooc: await FileAttachment("data/dictionary/region_cooccurrence_pmi.parquet").href,
+  modules: await FileAttachment("data/dictionary/region_modules.parquet").href,
+  moduleSummary: await FileAttachment("data/dictionary/module_summary.parquet").href,
+  classProto: await FileAttachment("data/dictionary/region_class_prototypes.parquet").href,
+  conceptAxes: await FileAttachment("data/dictionary/region_concept_axes.parquet").href,
+  targetEvidence: await FileAttachment("data/dictionary/region_target_evidence.parquet").href,
+  targetSummary: await FileAttachment("data/dictionary/region_target_evidence_summary.parquet").href
 };
 ```
 
@@ -73,7 +81,14 @@ const TABLE = {
   regionStats: "dict_region_stats",
   tokenizedCorpus: "dict_tokenized_corpus",
   regionsClassed: "dict_regions_classed",
-  featuredSignal: "dict_featured_signal"
+  featuredSignal: "dict_featured_signal",
+  cooc: "dict_cooc",
+  modules: "dict_modules",
+  moduleSummary: "dict_module_summary",
+  classProto: "dict_class_proto",
+  conceptAxes: "dict_concept_axes",
+  targetEvidence: "dict_target_evidence",
+  targetSummary: "dict_target_summary"
 };
 ```
 
@@ -91,7 +106,14 @@ const tablesReady = await (async () => {
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tracks} AS SELECT * FROM read_parquet('${parquetUrls.tracks}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.regionStats} AS SELECT * FROM read_parquet('${parquetUrls.regionStats}')`),
     coord.exec(`CREATE OR REPLACE TABLE ${TABLE.tokenizedCorpus} AS SELECT * FROM read_parquet('${parquetUrls.tokenizedCorpus}')`),
-    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredSignal} AS SELECT * FROM read_parquet('${parquetUrls.featuredSignal}')`)
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.featuredSignal} AS SELECT * FROM read_parquet('${parquetUrls.featuredSignal}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.cooc} AS SELECT * FROM read_parquet('${parquetUrls.cooc}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.modules} AS SELECT * FROM read_parquet('${parquetUrls.modules}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.moduleSummary} AS SELECT * FROM read_parquet('${parquetUrls.moduleSummary}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.classProto} AS SELECT * FROM read_parquet('${parquetUrls.classProto}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.conceptAxes} AS SELECT * FROM read_parquet('${parquetUrls.conceptAxes}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.targetEvidence} AS SELECT * FROM read_parquet('${parquetUrls.targetEvidence}')`),
+    coord.exec(`CREATE OR REPLACE TABLE ${TABLE.targetSummary} AS SELECT * FROM read_parquet('${parquetUrls.targetSummary}')`)
   ]);
   // Views go strictly AFTER all tables exist — chaining with `.then`
   // inside Promise.all races against mosaic mark schema queries.
@@ -112,6 +134,39 @@ const filesRows = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.files}`))
 const regions = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.regions}`));
 const regionStats = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.regionStats}`));
 const featuredSignal = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.featuredSignal}`));
+// Small per-token lookup tables for the dictionary card. The big ones
+// (cooc, modules, target_evidence) stay in DuckDB and are queried lazily
+// when a token is picked.
+const classProtoRows = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.classProto}`));
+const conceptAxesRows = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.conceptAxes}`));
+const targetSummaryRows = arrowToRows(await coord.query(`SELECT * FROM ${TABLE.targetSummary}`));
+```
+
+```js
+// Per-token lookup maps for the dictionary card.
+const classProtoByToken = new Map(classProtoRows.map((r) => [r.token_id, r]));
+const conceptAxesByToken = new Map(conceptAxesRows.map((r) => [r.token_id, r]));
+const targetSummaryByToken = new Map(targetSummaryRows.map((r) => [r.token_id, r]));
+const regionsByToken = new Map(regions.map((r) => [r.token_id, r]));
+```
+
+```js
+// Module-id lookup for the "Module ID" color toggle. Pulls only the
+// active_vs_repressive_pan_cell stratum at γ=1.0 (validated default —
+// AG cluster recovers as a coherent module here per pipeline impl log).
+const moduleIdByToken = await (async () => {
+  const rows = arrowToRows(await coord.query(`
+    SELECT token_id, module_id, is_anchor
+    FROM ${TABLE.modules}
+    WHERE stratum = 'active_vs_repressive_pan_cell' AND gamma = 1.0
+  `));
+  const m = new Map();
+  for (const r of rows) {
+    // Cast to string so vgplot treats it as categorical, not continuous.
+    m.set(r.token_id, {module_id: String(r.module_id), is_anchor: r.is_anchor});
+  }
+  return m;
+})();
 ```
 
 ```js
@@ -410,21 +465,53 @@ The neighborhoods you see here are **embedding-space** neighborhoods — regions
 
 ```js
 // Color encoding toggle for the region UMAP.
-//   "class"    — SCREEN regulatory class (the dictionary itself).
-//   "midpoint" — genomic midpoint (mean of start/end). Surfaces whether
-//                spatial neighbors on chr16 land near each other in the
-//                embedding.
-//   "files"    — n_files_total from region_stats. Surfaces housekeeping
-//                vs. cell-type-specific tokens.
+//   "class"     — SCREEN regulatory class (the dictionary itself).
+//   "midpoint"  — genomic midpoint. Surfaces whether spatial neighbors on chr16
+//                 land near each other in the embedding (mostly: no).
+//   "files"     — n_files_total from region_stats. Housekeeping vs. cell-type-specific.
+//   "anchor"    — concept-axis projection: promoter-like (+) ↔ distal-enhancer-like (−).
+//                 Direct evidence the embedding learned a continuous PLS↔dELS gradient.
+//   "activity"  — concept-axis projection: K562-active (+) ↔ K562-repressed (−).
+//   "K562_spec" — concept-axis projection: K562-specifically-active vs broad-active.
+//   "evidence"  — n_evidence_rows from target_evidence_summary. Highlights
+//                 well-studied vs under-studied regions.
 const regionColorBy = view(Inputs.radio(
   new Map([
     ["SCREEN class", "class"],
     ["Genomic midpoint", "midpoint"],
-    ["File count (log)", "files"]
+    ["File count (log)", "files"],
+    ["Anchor score (PLS ↔ dELS)", "anchor"],
+    ["Activity score (active ↔ repressed)", "activity"],
+    ["K562 specificity", "K562_spec"],
+    ["GM12878 specificity", "GM12878_spec"],
+    ["HepG2 specificity", "HepG2_spec"],
+    ["Target evidence count (log)", "evidence"],
+    ["Module ID (active_vs_repressive)", "module"]
   ]),
   {value: "class", label: "Color regions by"}
 ));
 ```
+
+```js
+// One-line description per color encoding — tells the reader what story
+// the current view is meant to surface.
+const regionColorByCaption = ({
+  class: "Discrete SCREEN labels (PLS / pELS / dELS / CA-CTCF / CA-H3K4me3). Shows the dictionary's prior — promoters cluster with promoters, distal enhancers form the large diffuse mass.",
+  midpoint: "Continuous chr16 position (red=start, blue=end). If the embedding had memorized location, you'd see a clean gradient. Instead it looks uniformly mixed — the embedding learned function, not position.",
+  files: "How many BED files this region was peak-called in (sqrt scale). Bright = housekeeping / broadly-accessible regions (CpG-island promoters, ubiquitous open chromatin); dark = cell-type-specific or rarely-called.",
+  anchor: "Concept-axis projection onto a learned promoter-vs-distal-enhancer direction in R2V space. Blue = promoter-like, red = distal-enhancer-like. Direct visual evidence the embedding has internalized a continuous PLS↔dELS gradient as a single direction.",
+  activity: "Concept-axis projection onto a K562-active vs K562-repressed direction. Green = active-like, magenta = repressed-like. Visible as a roughly vertical gradient — repressed regions concentrate in the upper diffuse mass, active regions toward the bottom — orthogonal to the anchor axis's left-right gradient. The two concept axes are picking up genuinely independent dimensions: a region can be promoter-like (anchor +) AND repressed (Polycomb-bivalent), or distal-enhancer-like (anchor −) AND active (typical pELS).",
+  K562_spec: "Concept-axis projection onto a K562-specifically-active vs broadly-active direction. Orange = K562-specific, purple = active in non-K562 contexts. The clearest pattern of the three lineage views: sharp, localized orange islands within the otherwise diffuse dELS mass — most prominently a bright cluster lower-left and a smaller cluster on the right edge. Erythroid-specific distal enhancers form a tight, spatially-coherent subpopulation in R2V space even though SCREEN's class label doesn't carry lineage information.",
+  GM12878_spec: "Lymphoid (GM12878) version of the same projection. The orange spreads more diffusely across the upper wing of the dELS mass, picking out *different* geographic regions than K562 — the K562-bright cluster (lower-left) is mostly purple here. Confirms that K562 and GM12878 have spatially separable distal-enhancer populations.",
+  HepG2_spec: "Hepatic (HepG2) version. Orange spreads broadly across the upper dELS mass, less focally than K562's sharp islands. Three lineages, three visibly different geographic patterns in the same UMAP — the embedding learned cell-type-specific enhancer programs as separable directions without ever seeing a lineage label during training. (K562 has the sharpest pattern partly because it dominates the corpus: ~3,200 K562 files vs ~900 GM12878 / ~1,800 HepG2.)",
+  evidence: "How many ENCODE V4 target-evidence rows this region accumulates (3D-chromatin + eQTL, +1 then log). Bright = well-studied / hub-like regions with many measured connections; dark = under-studied or solitary.",
+  module: "Leiden community ID from stage 13 in the active_vs_repressive_pan_cell stratum (γ=1.0). Same color = same module. Tokens cluster geographically by module — direct visual evidence the corpus → NPMI graph → community detection chain produces spatially coherent groupings on the embedding (despite Leiden never seeing UMAP coords). The 17 modules at this resolution are coarse: dELS-dominant, pELS-dominant, etc., each spanning thousands of regions. Tokens missing from this stratum (failed statistical floor) show as gray '—'."
+})[regionColorBy];
+```
+
+<div style="font-size: 0.85em; color: #555; margin: -0.6em 0 1em 0; padding: 0.5em 0.8em; background: #f7f7f5; border-left: 3px solid #888; border-radius: 0 3px 3px 0;">
+${regionColorByCaption}
+</div>
 
 
 ```js
@@ -442,16 +529,34 @@ const inIntervalSet = new Set(
     )
     .map((r) => r.token_id)
 );
-// Augment chr16 tokens with derived encodings (midpoint, file count) so
-// any of the three color modes can read straight off a dot's row.
+// Augment chr16 tokens with derived encodings so any of the color modes
+// can read straight off a dot's row. Adds: midpoint, n_files_total (legacy
+// region_stats), anchor_score / activity_score / K562_specificity_score
+// (concept axes from R2V embedding), n_evidence_rows (Tier A target evidence
+// count).
 const regionStatsByToken = new Map(regionStats.map((s) => [s.token_id, s]));
 const classedChr16 = regions
   .filter((r) => r.cclass !== null)
-  .map((r) => ({
-    ...r,
-    midpoint: (Number(r.start) + Number(r.end)) / 2,
-    n_files_total: Number(regionStatsByToken.get(r.token_id)?.n_files_total ?? 0)
-  }));
+  .map((r) => {
+    const ax = conceptAxesByToken.get(r.token_id);
+    const tg = targetSummaryByToken.get(r.token_id);
+    return {
+      ...r,
+      midpoint: (Number(r.start) + Number(r.end)) / 2,
+      n_files_total: Number(regionStatsByToken.get(r.token_id)?.n_files_total ?? 0),
+      anchor_score: ax ? Number(ax.anchor_score) : 0,
+      activity_score: ax ? Number(ax.activity_score) : 0,
+      K562_specificity_score: ax ? Number(ax.K562_specificity_score) : 0,
+      GM12878_specificity_score: ax ? Number(ax.GM12878_specificity_score) : 0,
+      HepG2_specificity_score: ax ? Number(ax.HepG2_specificity_score) : 0,
+      // Add 1 so we can use log scale without log(0). Tokens with no
+      // evidence will show as the lowest-color (1 → 0 on log scale).
+      n_evidence_rows: tg ? Number(tg.n_evidence_rows) + 1 : 1,
+      // Module ID in active_vs_repressive_pan_cell stratum (γ=1.0).
+      // String for categorical; "—" for tokens not in this stratum.
+      module_id_avr: moduleIdByToken.get(r.token_id)?.module_id ?? "—"
+    };
+  });
 
 // Cell deliberately does NOT reference pickedTokenId — the picked-ring
 // overlay is rendered via vg.from + filterBy on pickedTokenSel, so clicks
@@ -466,13 +571,38 @@ const regionUmap = (() => {
   const colorChannel =
     regionColorBy === "class" ? "cclass"
     : regionColorBy === "midpoint" ? "midpoint"
-    : "n_files_total";
+    : regionColorBy === "files" ? "n_files_total"
+    : regionColorBy === "anchor" ? "anchor_score"
+    : regionColorBy === "activity" ? "activity_score"
+    : regionColorBy === "K562_spec" ? "K562_specificity_score"
+    : regionColorBy === "GM12878_spec" ? "GM12878_specificity_score"
+    : regionColorBy === "HepG2_spec" ? "HepG2_specificity_score"
+    : regionColorBy === "module" ? "module_id_avr"
+    : "n_evidence_rows";
   const colorDirectives =
     regionColorBy === "class"
       ? [vg.colorDomain(SCREEN_CLASS_COLOR_DOMAIN), vg.colorRange(SCREEN_CLASS_COLOR_RANGE)]
       : regionColorBy === "midpoint"
         ? [vg.colorScheme("turbo"), vg.colorLabel("midpoint (Mb)"), vg.colorTickFormat((d) => (d / 1e6).toFixed(1))]
-        : [vg.colorScheme("viridis"), vg.colorScale("sqrt"), vg.colorLabel("n files (sqrt)")];
+      : regionColorBy === "files"
+        ? [vg.colorScheme("viridis"), vg.colorScale("sqrt"), vg.colorLabel("n files (sqrt)")]
+      : regionColorBy === "anchor"
+        // Divergent: red = distal-enhancer-like (negative); blue = promoter-like (positive).
+        // Symmetric around 0 so the gradient axis is interpretable.
+        ? [vg.colorScheme("RdBu"), vg.colorDomain([-0.7, 0.7]), vg.colorLabel("anchor score")]
+      : regionColorBy === "activity"
+        ? [vg.colorScheme("PiYG"), vg.colorDomain([-0.5, 0.5]), vg.colorLabel("activity score")]
+      : regionColorBy === "K562_spec"
+        ? [vg.colorScheme("PuOr"), vg.colorDomain([-0.3, 0.3]), vg.colorLabel("K562 specificity")]
+      : regionColorBy === "GM12878_spec"
+        ? [vg.colorScheme("PuOr"), vg.colorDomain([-0.3, 0.3]), vg.colorLabel("GM12878 specificity")]
+      : regionColorBy === "HepG2_spec"
+        ? [vg.colorScheme("PuOr"), vg.colorDomain([-0.3, 0.3]), vg.colorLabel("HepG2 specificity")]
+      : regionColorBy === "module"
+        // Tableau 10 cycles for the ~17 modules at γ=1.0; visual clustering
+        // works even with some color repetition.
+        ? [vg.colorScheme("tableau10"), vg.colorLabel("module_id (active_vs_repressive)")]
+        : [vg.colorScheme("viridis"), vg.colorScale("log"), vg.colorLabel("evidence rows (+1, log)")];
   const plot = vg.plot(
     vg.dot(classedChr16, {
       x: "umap_x", y: "umap_y", fill: colorChannel,
@@ -485,6 +615,17 @@ const regionUmap = (() => {
     vg.dot(inInterval, {
       x: "umap_x", y: "umap_y", fill: colorChannel,
       stroke: "black", strokeWidth: 0.7, r: 2.4
+    }),
+    // Partner overlays: NPMI partners first (orange ring, slightly larger)
+    // then kNN partners (blue ring, smaller) so kNN draws on top — overlapping
+    // partners show both rings concentric.
+    vg.dot(vg.from(TABLE.regions, {filterBy: npmiPartnersSel}), {
+      x: "umap_x", y: "umap_y",
+      stroke: "#e07a00", strokeWidth: 1.6, fill: "none", r: 6
+    }),
+    vg.dot(vg.from(TABLE.regions, {filterBy: knnPartnersSel}), {
+      x: "umap_x", y: "umap_y",
+      stroke: "#1f78b4", strokeWidth: 1.6, fill: "none", r: 4.5
     }),
     vg.dot(vg.from(TABLE.regions, {filterBy: pickedTokenSel}), {
       x: "umap_x", y: "umap_y",
@@ -514,7 +655,7 @@ const regionUmap = (() => {
 ${regionUmap}
 
 <div style="font-size: 0.85em; color: #666; margin-top: -0.5em;">
-${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to highlight it as a focal region."}
+${classedChr16.length.toLocaleString()} chr16 tokens with SCREEN class. ${inIntervalSet.size} tokens lie within the current interval. ${pickedTokenId != null ? `Picked: ${classedChr16.find((r) => r.token_id === pickedTokenId)?.region ?? `token ${pickedTokenId}`}.` : "Click a token to highlight it as a focal region."} <span style="color: #1f78b4;">⬤</span> blue rings = top-30 R2V kNN partners; <span style="color: #e07a00;">⬤</span> orange rings = top-30 NPMI partners (corpus_baseline lens). Where they overlap is robust grammar; where one ring sits without the other is diagnostic.
 </div>
 
 ## 3. Files share a dictionary
@@ -571,6 +712,14 @@ if (_initialTokenId != null) {
     clausePoint("token_id", _initialTokenId, {source: pickTokenBridge})
   );
 }
+// Partner highlights for the picked token: kNN partners (R2V embedding) and
+// NPMI partners (corpus PMI). Each is a separate Selection.intersect so we
+// can render them as distinct visual layers on the region UMAP — different
+// stroke colors so the user sees where the two surfaces agree vs diverge.
+const knnPartnersSel = vg.Selection.intersect({empty: true});
+const npmiPartnersSel = vg.Selection.intersect({empty: true});
+const knnPartnersBridge = {};
+const npmiPartnersBridge = {};
 // Stats for the caption — populated by the intersection bridge below.
 const sectionStats = Mutable({n_files: 0, n_regions: 0, has_selection: false});
 function setSectionStats(s) { sectionStats.value = s; }
@@ -583,6 +732,40 @@ function setSectionStats(s) { sectionStats.value = s; }
   const handler = () => setPickedTokenId(pickedTokenSel.value ?? null);
   pickedTokenSel.addEventListener("value", handler);
   invalidation.then(() => pickedTokenSel.removeEventListener("value", handler));
+}
+
+// Bridge: pickedTokenSel + currentLens → knnPartnersSel + npmiPartnersSel.
+// Cell depends on currentLens so it re-registers (and re-fires) whenever
+// the lens picker changes — the orange NPMI ring on the UMAP stays in sync
+// with the card's Section 5 partner list.
+{
+  const lens = currentLens;  // captured in closure; cell re-runs on lens change
+  const handler = async () => {
+    const tokenId = pickedTokenSel.value ?? null;
+    if (tokenId == null) {
+      knnPartnersSel.update(clausePoints(["token_id"], [], {source: knnPartnersBridge}));
+      npmiPartnersSel.update(clausePoints(["token_id"], [], {source: npmiPartnersBridge}));
+      return;
+    }
+    // Sync: kNN partners from viz_chr16's already-loaded knn_token_ids.
+    const region = regionsByToken.get(tokenId);
+    const knnIds = (region?.knn_token_ids ?? []).slice(0, 30).map((id) => [Number(id)]);
+    knnPartnersSel.update(clausePoints(["token_id"], knnIds, {source: knnPartnersBridge}));
+    // Async: NPMI partners from cooc parquet under current lens.
+    const result = await coord.query(`
+      SELECT partner_token_ids
+      FROM ${TABLE.cooc}
+      WHERE token_id = ${tokenId} AND stratum = '${lens}'
+      LIMIT 1
+    `);
+    const rows = arrowToRows(result);
+    const npmiIds = (rows[0]?.partner_token_ids ?? []).slice(0, 30).map((id) => [Number(id)]);
+    npmiPartnersSel.update(clausePoints(["token_id"], npmiIds, {source: npmiPartnersBridge}));
+  };
+  pickedTokenSel.addEventListener("value", handler);
+  invalidation.then(() => pickedTokenSel.removeEventListener("value", handler));
+  // Fire once on cell run so lens-change immediately repopulates partner overlays.
+  handler();
 }
 
 // Mutual-exclusion bridge: when the legend writes a clause, clear the
@@ -761,4 +944,782 @@ const minFrac = view(Inputs.range([0, 1], {
 ${sectionStats.has_selection
   ? `${sectionStats.n_files.toLocaleString()} ${sectionStats.n_files === 1 ? "file" : "files"} selected. ${sectionStats.n_regions.toLocaleString()} chr16 regions active in ≥ ${Math.round((sectionStats.min_frac ?? 1) * 100)}% of them.`
   : "Click a file or an assay in the legend to define a selection."}
+</div>
+
+## 4. Looking up an entry
+
+The dictionary's whole point is that every regulatory region has a **substantive entry** you can look up. Below: first a worked example for the **HBA1 promoter** (a canonical case for the dictionary because α-globin biology is well-studied), then a live card that populates with whatever region you click in the embedding above (Section 2).
+
+```js
+// HBA1 (token 255786) worked example — pinned static showcase before the
+// live card. Uses the same data sources but always renders for HBA1 with
+// inline callouts explaining what to read into each section. Re-runs only
+// at page load; doesn't react to clicks or lens changes.
+const hba1Showcase = await (async () => {
+  const HBA1 = 255786;
+  const region = regionsByToken.get(HBA1);
+  const proto = classProtoByToken.get(HBA1);
+  const axes = conceptAxesByToken.get(HBA1);
+  const targets = targetSummaryByToken.get(HBA1);
+
+  // Pull HBA1's corpus_baseline NPMI partners + per-stratum marginals.
+  const coocResult = arrowToRows(await coord.query(`
+    SELECT partner_token_ids, weights_npmi, counts, n_files_active, n_files_in_stratum
+    FROM ${TABLE.cooc} WHERE token_id = ${HBA1} AND stratum = 'corpus_baseline' LIMIT 1
+  `));
+  const coocRow = coocResult[0];
+  const marginalsRows = arrowToRows(await coord.query(`
+    SELECT stratum, n_files_active, n_files_in_stratum
+    FROM ${TABLE.cooc} WHERE token_id = ${HBA1}
+  `));
+  const margMap = new Map(marginalsRows.map((r) => [r.stratum, r]));
+
+  // AG cluster token IDs for highlighting cluster siblings in partner lists.
+  const agSet = new Set(
+    regions.filter((r) => r.chrom === "chr16" && r.start >= 218000 && r.end <= 238000)
+      .map((r) => r.token_id)
+  );
+
+  // ---- Helper: partner chip renderer ----
+  const partnerChip = (pid, label) => {
+    const p = regionsByToken.get(pid);
+    const cc = p?.cclass || "unclassed";
+    const color = classColor(cc);
+    const isAG = agSet.has(pid);
+    const regionStr = p ? p.region : `token ${pid}`;
+    const agBadge = isAG ? ' <span style="background: #fef3c7; color: #92400e; padding: 0 4px; border-radius: 2px; font-size: 9px; font-weight: 700;">AG</span>' : "";
+    return `<span style="display: inline-block; padding: 2px 8px; margin: 1px 3px 1px 0;
+                         border-left: 3px solid ${color}; background: white; border-radius: 3px;
+                         font-size: 11px; font-family: ui-monospace, Menlo, monospace;">
+      <span style="color: ${color}; font-weight: 600;">${cc}</span>
+      ${regionStr}${agBadge}${label ? ` <span style="color: #888;">${label}</span>` : ""}</span>`;
+  };
+
+  const callout = (text) => `
+    <div style="margin: 6px 0 14px 0; padding: 8px 12px; background: #eef6fb;
+                border-left: 3px solid #2b7a9d; border-radius: 0 3px 3px 0;
+                font-size: 12px; color: #1e3a52; font-style: italic;">
+      ${text}
+    </div>`;
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText =
+    "border: 1px solid #c8d6e0; border-radius: 6px; padding: 18px 22px; " +
+    "background: #f5f8fa; max-width: 1200px; font-size: 13px; line-height: 1.45; " +
+    "margin-bottom: 22px;";
+
+  // ---- Header with "Worked example" badge ----
+  const headerHTML = `
+    <div style="display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px;">
+      <div>
+        <span style="background: #2b7a9d; color: white; padding: 3px 10px; border-radius: 3px;
+                     font-size: 11px; font-weight: 700; letter-spacing: 0.5px;">WORKED EXAMPLE</span>
+        <span style="margin-left: 12px; font-size: 16px; font-weight: 600; color: #222;">HBA1 promoter — ${region.region}</span>
+        <span style="background: ${classColor(region.cclass)}; color: white; padding: 2px 9px; border-radius: 3px;
+                     margin-left: 8px; font-weight: 600; font-size: 12px;">${region.cclass}</span>
+      </div>
+      <span style="font-size: 11px; color: #888;">token ${HBA1} · ${region.end - region.start} bp</span>
+    </div>
+    <div style="font-size: 12px; color: #555; margin-bottom: 12px;">
+      One of the major α-globin gene promoters at chr16:226–235k. Erythroid-specific in transcriptional output but its CpG-island promoter is broadly accessible across cell types — a compact case demonstrating that <em>chromatin footprint and gene expression are different signals</em>, both of which the dictionary needs to surface.
+    </div>`;
+
+  // ---- Class soft profile ----
+  const distEntries = Object.entries(proto)
+    .filter(([k]) => k.startsWith("distance_"))
+    .map(([k, v]) => [k.replace("distance_", ""), Number(v)])
+    .sort((a, b) => a[1] - b[1]);
+  const weights = distEntries.map(([, d]) => 1 / (d + 0.01));
+  const total = weights.reduce((a, b) => a + b, 0);
+  const pcts = weights.map((w) => (w / total) * 100);
+  const classBars = distEntries.map(([cc, d], i) => {
+    const color = classColor(cc);
+    return `
+      <div style="display: flex; align-items: center; gap: 8px; margin: 1px 0;">
+        <div style="width: 90px; font-size: 11px; color: #555;">${cc}</div>
+        <div style="flex: 1; height: 9px; max-width: 240px; background: #e2e8f0; border-radius: 2px; overflow: hidden;">
+          <div style="height: 100%; width: ${pcts[i]}%; background: ${color};"></div>
+        </div>
+        <div style="font-size: 10px; color: #888; font-family: ui-monospace, Menlo, monospace; width: 60px;">
+          ${pcts[i].toFixed(0)}% · d=${d.toFixed(2)}
+        </div>
+      </div>`;
+  }).join("");
+  const classCallout = callout(
+    `→ <strong>PLS at ${pcts[distEntries.findIndex(([cc]) => cc === "PLS")].toFixed(0)}%</strong>, far above the next-closest class. The embedding strongly identifies HBA1 as a promoter — the categorical SCREEN label and the soft profile agree. The mild pELS overlap (~11%) is biologically reasonable given HBA1 sits adjacent to the α-globin enhancer cluster.`
+  );
+
+  // ---- Concept axes ----
+  const axisEntries = [
+    ["anchor", "promoter-like ↔ enhancer-like"],
+    ["activity", "active ↔ repressed"],
+    ["K562_specificity", "K562-specific"],
+    ["GM12878_specificity", "GM12878-specific"],
+    ["HepG2_specificity", "HepG2-specific"],
+  ];
+  const axisBars = axisEntries.map(([key, label]) => {
+    const v = Number(axes[`${key}_score`] ?? 0);
+    const positive = v >= 0;
+    const pct = Math.min(100, Math.abs(v) * 100);
+    const color = positive ? "#2ca02c" : "#d62728";
+    return `
+      <div style="display: flex; align-items: center; gap: 8px; margin: 1px 0;">
+        <div style="width: 180px; font-size: 11px; color: #555;">${label}</div>
+        <div style="position: relative; flex: 1; height: 9px; max-width: 240px; background: #e2e8f0; border-radius: 2px;">
+          <div style="position: absolute; left: 50%; top: 0; height: 100%; width: 1px; background: #94a3b8;"></div>
+          <div style="position: absolute; ${positive ? "left" : "right"}: 50%; top: 0; height: 100%;
+                      width: ${pct / 2}%; background: ${color};
+                      ${positive ? "border-radius: 0 2px 2px 0" : "border-radius: 2px 0 0 2px"};"></div>
+        </div>
+        <div style="font-size: 10px; color: #888; font-family: ui-monospace, Menlo, monospace; width: 60px;">
+          ${v >= 0 ? "+" : ""}${v.toFixed(3)}
+        </div>
+      </div>`;
+  }).join("");
+  const axesCallout = callout(
+    `→ <strong>anchor = +${axes.anchor_score.toFixed(2)}</strong> sits above the typical PLS median (+0.43) — the embedding sees HBA1 as <em>more</em> promoter-like than the average PLS, plausibly because the CpG-island TSS gives a sharp distinguishing signal in R2V space. <strong>K562 specificity = +${axes.K562_specificity_score.toFixed(2)}</strong> is small but positive — real erythroid bias detected in the embedding, but small in magnitude because HBA1's chromatin is broadly active across cell types. The two readings together: "broadly accessible promoter, slightly more so in K562" — biologically right.`
+  );
+
+  // ---- Senses across contexts (compressed, just the most informative strata) ----
+  const sensesStrata = [
+    {key: "corpus_baseline", display: "corpus_baseline (L1)"},
+    {key: "active_promoters_pan_cell", display: "active_promoters (L4)"},
+    {key: "erythroid_active", display: "erythroid_active (L5)"},
+    {key: "lymphoid_active", display: "lymphoid_active (L5)"},
+    {key: "hepatic_active", display: "hepatic_active (L5)"},
+    {key: "polycomb_repressed_pan_cell", display: "polycomb_repressed (L4)"},
+  ];
+  const sensesBars = sensesStrata.map(({key, display}) => {
+    const m = margMap.get(key);
+    if (!m) {
+      return `
+        <div style="display: flex; align-items: center; gap: 8px; margin: 1px 0; opacity: 0.45;">
+          <div style="width: 220px; font-size: 11px; color: #888;">${display}</div>
+          <div style="flex: 1; height: 9px; max-width: 240px; background: #e2e8f0; border-radius: 2px;"></div>
+          <div style="font-size: 10px; color: #aaa; font-family: ui-monospace, Menlo, monospace; width: 90px;">below floor</div>
+        </div>`;
+    }
+    const pct = (Number(m.n_files_active) / Number(m.n_files_in_stratum)) * 100;
+    return `
+      <div style="display: flex; align-items: center; gap: 8px; margin: 1px 0;">
+        <div style="width: 220px; font-size: 11px; color: #555;">${display}</div>
+        <div style="flex: 1; height: 9px; max-width: 240px; background: #e2e8f0; border-radius: 2px; overflow: hidden;">
+          <div style="height: 100%; width: ${pct}%; background: #2b7a9d;"></div>
+        </div>
+        <div style="font-size: 10px; color: #888; font-family: ui-monospace, Menlo, monospace; width: 90px;">
+          ${m.n_files_active}/${m.n_files_in_stratum} = ${pct.toFixed(0)}%
+        </div>
+      </div>`;
+  }).join("");
+  const sensesCallout = callout(
+    `→ Active in essentially <strong>every</strong> active-promoter file (chromatin accessibility / H3K4me3 mark) and in nearly every active-mark file across all three viz cell lines (K562 96%, lymphoid 80%, hepatic 80%). <strong>The transcriptional output is erythroid-specific; the chromatin footprint isn't.</strong> Below floor in <code>polycomb_repressed_pan_cell</code> — HBA1 is essentially never marked as Polycomb-silenced (CpG-island promoters generally aren't). One of the bars (active_promoters_pan_cell) is at 100% — corpus PMI under <em>that</em> lens would saturate (NPMI ≈ 0 for every partner) — exactly the case the live card's saturation warning catches.`
+  );
+
+  // ---- Grammatical relations ----
+  const knnIds = (region.knn_token_ids ?? []).slice(0, 5);
+  const knnDists = (region.knn_distances ?? []).slice(0, 5);
+  const knnRow = knnIds.map((pid, i) => partnerChip(pid, `cos=${Number(knnDists[i]).toFixed(3)}`)).join("");
+  const npmiIds = (coocRow?.partner_token_ids ?? []).slice(0, 5);
+  const npmiVals = (coocRow?.weights_npmi ?? []).slice(0, 5);
+  const npmiCounts = (coocRow?.counts ?? []).slice(0, 5);
+  const npmiRow = npmiIds.map((pid, i) =>
+    partnerChip(pid, `npmi=${Number(npmiVals[i]).toFixed(3)}, cooc=${Number(npmiCounts[i])}`)
+  ).join("");
+
+  // Count AG cluster siblings recovered across both surfaces
+  const knn30 = (region.knn_token_ids ?? []).slice(0, 30);
+  const npmi30 = (coocRow?.partner_token_ids ?? []).slice(0, 30);
+  const agInKnn = knn30.filter((id) => agSet.has(id) && id !== HBA1);
+  const agInNpmi = npmi30.filter((id) => agSet.has(id) && id !== HBA1);
+  const agUnion = new Set([...agInKnn, ...agInNpmi]);
+  const grammarHTML = `
+    <div style="margin-top: 4px;">
+      <div style="font-size: 11px; color: #666; margin-bottom: 3px;">R2V kNN (top 5):</div>
+      <div>${knnRow}</div>
+    </div>
+    <div style="margin-top: 8px;">
+      <div style="font-size: 11px; color: #666; margin-bottom: 3px;">corpus_baseline NPMI (top 5):</div>
+      <div>${npmiRow}</div>
+    </div>`;
+  const grammarCallout = callout(
+    `→ Both surfaces surface adjacent α-globin cluster siblings (yellow <strong>AG</strong> badge above). R2V kNN includes <strong>${agInKnn.length}</strong> AG cluster members in its top-30; corpus_baseline NPMI surfaces <strong>${agInNpmi.length}</strong>; together they recover <strong>${agUnion.size} of 13</strong> AG siblings — partners neither surface alone surfaces in full. The two views aren't redundant: kNN found cluster members R2V learned were similar (smoothed), NPMI found cluster members that empirically co-activate (raw evidence). Both are corpus-grounded; their agreement is the dictionary's grammar holding up to triangulation.`
+  );
+
+  // ---- Target evidence ----
+  const topGenes = (targets?.top_genes ?? []).slice(0, 5);
+  const targetChips = topGenes.map((g) => `
+    <span style="display: inline-block; padding: 3px 10px; margin: 2px 4px 2px 0;
+                 background: white; border: 1px solid #cbd5e0; border-radius: 3px;
+                 font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+                 font-weight: 600; color: #2d3748;">${g}</span>`).join("");
+  const targetCount = `${Number(targets?.n_evidence_rows ?? 0)} rows (${Number(targets?.n_3d_chromatin ?? 0)} 3D, ${Number(targets?.n_eqtl ?? 0)} eQTL) across ${Number(targets?.n_distinct_contexts ?? 0)} contexts`;
+  const targetCallout = callout(
+    `→ Top "target": <strong>${topGenes[0] ?? "—"}</strong> — but read carefully. Because HBA1 is a <strong>PLS</strong>, the V4 evidence reports <em>genes whose promoters HBA1 contacts in 3D space</em> (TAD-mate genes), not "genes HBA1 regulates." ${topGenes[0]}, NPRL3, SNRNP25 etc. all sit in the same chr16 TAD; the 3D-chromatin data is recovering that TAD without ever computing TADs explicitly. For an <em>enhancer</em> focal region the same target_gene would read as "regulated promoter" instead. The dictionary card needs UI discipline to surface this distinction; in this worked example it's called out explicitly.`
+  );
+
+  wrap.innerHTML = `
+    ${headerHTML}
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start;">
+      <div>
+        <div style="font-weight: 600; font-size: 12px; color: #444; margin-bottom: 4px;">Class soft profile</div>
+        ${classBars}
+        ${classCallout}
+        <div style="font-weight: 600; font-size: 12px; color: #444; margin-bottom: 4px;">Concept-axis projections</div>
+        ${axisBars}
+        ${axesCallout}
+      </div>
+      <div>
+        <div style="font-weight: 600; font-size: 12px; color: #444; margin-bottom: 4px;">Senses across contexts (selected strata)</div>
+        ${sensesBars}
+        ${sensesCallout}
+        <div style="font-weight: 600; font-size: 12px; color: #444; margin-bottom: 4px;">Top "target" evidence</div>
+        <div style="font-size: 11px; color: #666; margin-bottom: 4px;">${targetCount}</div>
+        <div>${targetChips}</div>
+        ${targetCallout}
+      </div>
+    </div>
+    <div>
+      <div style="font-weight: 600; font-size: 12px; color: #444; margin: 4px 0;">Grammatical relations (R2V kNN + corpus_baseline NPMI, top 5 each)</div>
+      ${grammarHTML}
+      ${grammarCallout}
+    </div>
+    <div style="font-size: 11px; color: #666; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #c8d6e0;">
+      <strong>What to read out of this:</strong> a single dictionary entry compactly carries class identity (hard label + soft profile + concept axes), multi-stratum activity profile, two complementary partner views (R2V kNN + corpus PMI), and predicted regulatory targets — with methodologically honest framing where it matters (saturation warnings, PLS-vs-enhancer reading distinctions). This is the format every region's entry takes; below, click any region in Section 2's embedding to see its own card under any lens you choose.
+    </div>`;
+  return wrap;
+})();
+```
+
+${hba1Showcase}
+
+The card below populates with whatever region you click in the embedding above (Section 2). It surfaces the region's identity (class + soft profile), its concept-axis scores in R2V's learned space, two parallel views of grammatical neighbors (functional similarity from R2V kNN; corpus grammar from PMI cooccurrence — under whichever **lens** you pick below), and predicted regulatory targets from ENCODE V4's direct experimental evidence.
+
+The **stratum lens** controls which biological question the corpus-grammar partners answer. `corpus_baseline` is the broad reference; mark-specific and lineage-specific lenses sharpen the partners to a particular biological context. For hub regions (canonical promoters / CTCF sites), narrow lenses often saturate (token in 100% of stratum files → NPMI ≈ 0); broad lenses give the cleanest partners. The lens also drives the orange (NPMI) partner overlay on the embedding above.
+
+```js
+// Stratum lens picker — drives the card's Section 5 (corpus-grammar partners)
+// and the orange NPMI partner overlay on the region UMAP. 18 strata across
+// 6 levels (L1 corpus → L6 contrast). Default: corpus_baseline (broad,
+// Goldilocks for most tokens).
+const currentLens = view(Inputs.select(
+  [
+    "corpus_baseline",
+    "featured_lineage_K562",
+    "featured_lineage_GM12878",
+    "featured_lineage_HepG2",
+    "open_chromatin_pan_cell",
+    "tf_bound_pan_cell",
+    "active_enhancers_pan_cell",
+    "active_promoters_pan_cell",
+    "polycomb_repressed_pan_cell",
+    "heterochromatin_pan_cell",
+    "ctcf_boundaries",
+    "erythroid_active",
+    "lymphoid_active",
+    "hepatic_active",
+    "active_vs_repressive_pan_cell",
+    "erythroid_vs_other_repressive",
+    "lymphoid_vs_other_repressive",
+    "hepatic_vs_other_repressive"
+  ],
+  {value: "corpus_baseline", label: "Stratum lens (corpus-grammar partners)"}
+));
+```
+
+```js
+// Dictionary entry card. Re-renders when pickedTokenId or currentLens changes.
+// Async because we query the cooc parquet on demand (it's 97 MB; full
+// materialization would block load). Other lookups are JS-side maps.
+const dictCard = await (async () => {
+  const tokenId = pickedTokenId;
+  const wrap = document.createElement("div");
+  wrap.style.cssText =
+    "border: 1px solid #ccc; border-radius: 6px; padding: 18px 22px; " +
+    "background: #fafafa; max-width: 1200px; font-size: 14px; line-height: 1.5;";
+
+  if (tokenId == null) {
+    wrap.innerHTML =
+      `<em style="color: #888;">Click a region on the embedding above to look up its entry.</em>`;
+    return wrap;
+  }
+
+  const region = regionsByToken.get(tokenId);
+  if (!region) {
+    wrap.innerHTML = `<em>token ${tokenId} not found in chr16 universe.</em>`;
+    return wrap;
+  }
+
+  const proto = classProtoByToken.get(tokenId);
+  const axes = conceptAxesByToken.get(tokenId);
+  const targets = targetSummaryByToken.get(tokenId);
+
+  // Query top NPMI partners in the user-selected lens (defaults to corpus_baseline).
+  const lens = currentLens;
+  const coocResult = arrowToRows(await coord.query(`
+    SELECT partner_token_ids, weights_npmi, counts, n_files_active, n_files_in_stratum
+    FROM ${TABLE.cooc}
+    WHERE token_id = ${tokenId} AND stratum = '${lens}'
+    LIMIT 1
+  `));
+  const coocRow = coocResult[0];
+
+  // Per-stratum marginals across all 18 strata (Senses across contexts).
+  const marginalsRows = arrowToRows(await coord.query(`
+    SELECT stratum, n_files_active, n_files_in_stratum
+    FROM ${TABLE.cooc}
+    WHERE token_id = ${tokenId}
+  `));
+  const marginalsByStratum = new Map(
+    marginalsRows.map((r) => [r.stratum, r])
+  );
+
+  const knnIds = (region.knn_token_ids ?? []).slice(0, 10);
+  const knnDists = (region.knn_distances ?? []).slice(0, 10);
+
+  // Helper: render a partner as a class-colored chip.
+  const partnerChip = (pid, label) => {
+    const p = regionsByToken.get(pid);
+    const cc = p?.cclass || "unclassed";
+    const color = classColor(cc);
+    const regionStr = p ? p.region : `token ${pid}`;
+    return `<span style="display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0; ` +
+           `border-left: 3px solid ${color}; background: white; border-radius: 3px; ` +
+           `font-size: 12px; font-family: ui-monospace, Menlo, monospace;">` +
+           `<span style="color: ${color}; font-weight: 600;">${cc}</span> ` +
+           `${regionStr}${label ? ` <span style="color: #888;">${label}</span>` : ""}` +
+           `</span>`;
+  };
+
+  // ---- Section 1: Headword + class ----
+  const headerColor = classColor(region.cclass || "unclassed");
+  const length = region.end - region.start;
+  const headerHTML = `
+    <div style="display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px;">
+      <span style="font-size: 18px; font-weight: 600; color: #222;">${region.region}</span>
+      <span style="background: ${headerColor}; color: white; padding: 2px 10px; border-radius: 3px;
+                   font-weight: 600; font-size: 13px;">${region.cclass || "unclassed"}</span>
+      <span style="font-size: 12px; color: #888;">token ${tokenId} · ${length.toLocaleString()} bp</span>
+    </div>
+  `;
+
+  // ---- Section 2: Soft class profile ----
+  let softHTML = "";
+  if (proto) {
+    const distEntries = Object.entries(proto)
+      .filter(([k]) => k.startsWith("distance_"))
+      .map(([k, v]) => [k.replace("distance_", ""), v])
+      .sort((a, b) => a[1] - b[1]);
+    // Convert distance to similarity-ish weight (1 / (d + epsilon)), then normalize.
+    const weights = distEntries.map(([, d]) => 1 / (Number(d) + 0.01));
+    const total = weights.reduce((a, b) => a + b, 0);
+    const pcts = weights.map((w) => (w / total) * 100);
+    const bars = distEntries.map(([cc, d], i) => {
+      const color = classColor(cc);
+      return `
+        <div style="display: flex; align-items: center; gap: 8px; margin: 2px 0;">
+          <div style="width: 90px; font-size: 12px; color: #555;">${cc}</div>
+          <div style="flex: 1; height: 10px; background: #eee; border-radius: 2px; overflow: hidden; max-width: 240px;">
+            <div style="height: 100%; width: ${pcts[i]}%; background: ${color};"></div>
+          </div>
+          <div style="font-size: 11px; color: #888; font-family: ui-monospace, Menlo, monospace; width: 56px;">
+            ${pcts[i].toFixed(0)}% · d=${d.toFixed(2)}
+          </div>
+        </div>`;
+    }).join("");
+    softHTML = `
+      <div style="margin-top: 8px;">
+        <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 4px;">Class soft profile (R2V cosine to centroids)</div>
+        ${bars}
+      </div>`;
+  }
+
+  // ---- Section 3: Concept-axis scores ----
+  let axesHTML = "";
+  if (axes) {
+    const axisEntries = [
+      ["anchor", "promoter-like ↔ enhancer-like"],
+      ["activity", "active ↔ repressed"],
+      ["K562_specificity", "K562-specific"],
+      ["GM12878_specificity", "GM12878-specific"],
+      ["HepG2_specificity", "HepG2-specific"],
+    ];
+    const bars = axisEntries.map(([key, label]) => {
+      const v = Number(axes[`${key}_score`] ?? 0);
+      const positive = v >= 0;
+      const pct = Math.min(100, Math.abs(v) * 100); // axes are roughly [-1, 1]
+      const color = positive ? "#2ca02c" : "#d62728";
+      return `
+        <div style="display: flex; align-items: center; gap: 8px; margin: 2px 0;">
+          <div style="width: 180px; font-size: 12px; color: #555;">${label}</div>
+          <div style="position: relative; flex: 1; height: 10px; background: #eee; border-radius: 2px; max-width: 240px;">
+            <div style="position: absolute; left: 50%; top: 0; height: 100%; width: 1px; background: #999;"></div>
+            <div style="position: absolute; ${positive ? "left" : "right"}: 50%; top: 0; height: 100%;
+                        width: ${pct / 2}%; background: ${color}; ${positive ? "border-radius: 0 2px 2px 0" : "border-radius: 2px 0 0 2px"};"></div>
+          </div>
+          <div style="font-size: 11px; color: #888; font-family: ui-monospace, Menlo, monospace; width: 56px;">
+            ${v >= 0 ? "+" : ""}${v.toFixed(3)}
+          </div>
+        </div>`;
+    }).join("");
+    axesHTML = `
+      <div style="margin-top: 14px;">
+        <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 4px;">Concept-axis projections</div>
+        ${bars}
+      </div>`;
+  }
+
+  // ---- Section 3.5: Senses across contexts (per-stratum marginal activity) ----
+  // 18 strata, grouped by level (L1 corpus → L6 contrast). Bars colored by
+  // level. Each row shows n_files_active / n_files_in_stratum as a percentage.
+  // Strata where the token failed the floor (min_files_active >= 5) show as
+  // grayed "below floor" rows.
+  const stratumOrder = [
+    {key: "corpus_baseline", level: "L1", display: "corpus_baseline"},
+    {key: "featured_lineage_K562", level: "L2", display: "K562 (broad)"},
+    {key: "featured_lineage_GM12878", level: "L2", display: "GM12878 (broad)"},
+    {key: "featured_lineage_HepG2", level: "L2", display: "HepG2 (broad)"},
+    {key: "open_chromatin_pan_cell", level: "L3", display: "open chromatin"},
+    {key: "tf_bound_pan_cell", level: "L3", display: "TF-bound"},
+    {key: "active_enhancers_pan_cell", level: "L4", display: "active enhancers"},
+    {key: "active_promoters_pan_cell", level: "L4", display: "active promoters"},
+    {key: "polycomb_repressed_pan_cell", level: "L4", display: "Polycomb-repressed"},
+    {key: "heterochromatin_pan_cell", level: "L4", display: "heterochromatin"},
+    {key: "ctcf_boundaries", level: "L4", display: "CTCF boundaries"},
+    {key: "erythroid_active", level: "L5", display: "erythroid active"},
+    {key: "lymphoid_active", level: "L5", display: "lymphoid active"},
+    {key: "hepatic_active", level: "L5", display: "hepatic active"},
+    {key: "active_vs_repressive_pan_cell", level: "L6", display: "active vs repressive"},
+    {key: "erythroid_vs_other_repressive", level: "L6", display: "erythroid vs other-Polycomb"},
+    {key: "lymphoid_vs_other_repressive", level: "L6", display: "lymphoid vs other-Polycomb"},
+    {key: "hepatic_vs_other_repressive", level: "L6", display: "hepatic vs other-Polycomb"},
+  ];
+  const levelColors = {
+    L1: "#444", L2: "#3b82f6", L3: "#10b981",
+    L4: "#f59e0b", L5: "#ef4444", L6: "#8b5cf6"
+  };
+  const sensesHTML = `
+    <div style="margin-top: 14px;">
+      <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 4px;">
+        Senses across contexts (per-stratum marginal activity)
+      </div>
+      <div style="font-size: 11px; color: #888; margin-bottom: 6px;">
+        Fraction of files in each curated stratum where this region is active.
+        High = canonical for that biological question. Low = peripheral.
+        Grayed = excluded by min-files-active floor.
+      </div>
+      ${stratumOrder.map(({key, level, display}) => {
+        const m = marginalsByStratum.get(key);
+        const color = levelColors[level];
+        if (!m) {
+          return `
+            <div style="display: flex; align-items: center; gap: 8px; margin: 1px 0; opacity: 0.4;">
+              <div style="width: 32px; font-size: 10px; color: ${color}; font-weight: 600;">${level}</div>
+              <div style="width: 200px; font-size: 11px; color: #888;">${display}</div>
+              <div style="flex: 1; height: 9px; max-width: 280px; background: #eee; border-radius: 2px;"></div>
+              <div style="width: 88px; font-size: 10px; color: #aaa; font-family: ui-monospace, Menlo, monospace;">below floor</div>
+            </div>`;
+        }
+        const pct = (Number(m.n_files_active) / Number(m.n_files_in_stratum)) * 100;
+        return `
+          <div style="display: flex; align-items: center; gap: 8px; margin: 1px 0;">
+            <div style="width: 32px; font-size: 10px; color: ${color}; font-weight: 600;">${level}</div>
+            <div style="width: 200px; font-size: 11px; color: #555;">${display}</div>
+            <div style="flex: 1; height: 9px; max-width: 280px; background: #eee; border-radius: 2px; overflow: hidden;">
+              <div style="height: 100%; width: ${pct}%; background: ${color};"></div>
+            </div>
+            <div style="width: 88px; font-size: 10px; color: #888; font-family: ui-monospace, Menlo, monospace;">
+              ${Number(m.n_files_active)}/${Number(m.n_files_in_stratum)} = ${pct.toFixed(0)}%
+            </div>
+          </div>`;
+      }).join("")}
+    </div>`;
+
+  // ---- Section 4: R2V kNN partners ----
+  const knnHTML = knnIds.length === 0 ? "" : `
+    <div style="margin-top: 14px;">
+      <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 6px;">
+        Functional similarity (R2V kNN top-${knnIds.length})
+      </div>
+      <div>${knnIds.map((pid, i) => partnerChip(pid, `cos=${Number(knnDists[i]).toFixed(3)}`)).join("")}</div>
+    </div>`;
+
+  // ---- Section 5: Corpus PMI partners (current lens) ----
+  let pmiHTML = "";
+  if (coocRow) {
+    const pids = (coocRow.partner_token_ids ?? []).slice(0, 10);
+    const npmi = (coocRow.weights_npmi ?? []).slice(0, 10);
+    const counts = (coocRow.counts ?? []).slice(0, 10);
+    const marg_n = Number(coocRow.n_files_active);
+    const marg_d = Number(coocRow.n_files_in_stratum);
+    const marg_pct = marg_d > 0 ? (marg_n / marg_d) * 100 : 0;
+    // Saturation warning when token marginal is very high in this lens —
+    // PMI/NPMI lose discriminative power above ~80%.
+    const saturationNote = marg_pct >= 80
+      ? ` <span style="color: #c43; font-weight: 600;">Saturation warning:</span> token marginal is ${marg_pct.toFixed(0)}% in this lens, so NPMI is near-flat across partners (the partner ordering is mostly arbitrary). Try a broader lens (e.g., <code>corpus_baseline</code>).`
+      : "";
+    pmiHTML = `
+      <div style="margin-top: 14px;">
+        <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 6px;">
+          Corpus grammar (NPMI top-${pids.length}, lens: <code>${lens}</code>)
+        </div>
+        <div style="font-size: 11px; color: #888; margin-bottom: 4px;">
+          this region active in ${marg_n}/${marg_d} = ${marg_pct.toFixed(0)}% of stratum files${saturationNote}
+        </div>
+        <div>${pids.map((pid, i) =>
+          partnerChip(pid, `npmi=${Number(npmi[i]).toFixed(3)}, cooc=${Number(counts[i]).toFixed(0)}`)
+        ).join("")}</div>
+      </div>`;
+  } else {
+    pmiHTML = `
+      <div style="margin-top: 14px;">
+        <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 4px;">Corpus grammar</div>
+        <div style="font-size: 12px; color: #888;">
+          No PMI partners in <code>${lens}</code> — this region is below the statistical floor (active in <5 files of this stratum). Try a broader lens.
+        </div>
+      </div>`;
+  }
+
+  // ---- Section 6: Target evidence ----
+  let targetHTML = "";
+  if (targets) {
+    const topGenes = (targets.top_genes ?? []).slice(0, 5);
+    const cntStr =
+      `${Number(targets.n_evidence_rows).toLocaleString()} evidence rows ` +
+      `(${Number(targets.n_3d_chromatin)} 3D-chromatin, ${Number(targets.n_eqtl)} eQTL) ` +
+      `across ${Number(targets.n_distinct_contexts)} biosample/tissue contexts; ` +
+      `${Number(targets.n_distinct_genes)} distinct target genes`;
+    const reading = region.cclass === "PLS"
+      ? `<span style="color: #555;">(this is a PLS — listed genes are 3D-contact <em>partners in the same TAD</em>, not regulated targets)</span>`
+      : `<span style="color: #555;">(predicted regulated targets via 3D contact + eQTL evidence)</span>`;
+    targetHTML = `
+      <div style="margin-top: 14px;">
+        <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 4px;">
+          Tier A target evidence (ENCODE V4 cCRE-Gene Links)
+        </div>
+        <div style="font-size: 11px; color: #888; margin-bottom: 6px;">${cntStr} ${reading}</div>
+        <div>${topGenes.map((g) =>
+          `<span style="display: inline-block; padding: 3px 10px; margin: 2px 4px 2px 0;
+                        background: white; border: 1px solid #ddd; border-radius: 3px;
+                        font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+                        font-weight: 600; color: #333;">${g}</span>`
+        ).join("")}</div>
+      </div>`;
+  } else {
+    targetHTML = `
+      <div style="margin-top: 14px;">
+        <div style="font-weight: 600; font-size: 13px; color: #444; margin-bottom: 4px;">Tier A target evidence</div>
+        <div style="font-size: 12px; color: #888;">
+          No 3D-chromatin or eQTL evidence available for this region.
+        </div>
+      </div>`;
+  }
+
+  wrap.innerHTML = headerHTML + softHTML + axesHTML + sensesHTML + knnHTML + pmiHTML + targetHTML;
+  return wrap;
+})();
+```
+
+${dictCard}
+
+<div style="font-size: 0.85em; color: #666; margin-top: 0.5em;">
+The grammatical-relations section shows two **parallel** views: R2V kNN partners (functional similarity in 100-dim embedding space) and corpus PMI partners (regions that actually co-occur in the same BED files, popularity-discounted via NPMI). Where both views surface the same partner, the grammar is robust; where they diverge, it's diagnostic — embedding-smoothed transitive similarity vs. raw cooccurrence evidence.
+</div>
+
+## 5. Browse the module catalogue
+
+Each stratum's Leiden community detection produces a set of **modules** — graph communities of regions whose corpus cooccurrence in that stratum binds them together. The catalogue below lists modules in the currently-selected lens, sorted by size (largest first). Each row shows the module's *anchor* (highest within-module eigenvector centrality), its dominant SCREEN class, member count, and the auto-label.
+
+**Click a module row to open its anchor's dictionary entry above.** Modules at γ=1.0 are coarse — typically dELS-dominant or pELS-dominant clusters spanning thousands of regions. Tier 4 work would surface finer-grained modules (γ-sweep) and curated featured-region sentences.
+
+```js
+// Module catalogue: load module summaries for the currently-selected lens
+// (gamma=1.0). The summary parquet is small (599 rows) so we materialize
+// once and filter in-JS.
+const moduleSummaryRows = arrowToRows(await coord.query(`
+  SELECT stratum, gamma, module_id, n_tokens, anchor_token_id,
+         anchor_region, anchor_cclass, dominant_class, class_counts, auto_label
+  FROM ${TABLE.moduleSummary}
+  WHERE gamma = 1.0
+  ORDER BY stratum, n_tokens DESC
+`));
+```
+
+```js
+// Render the module list for the active lens.
+const moduleCatalogue = (() => {
+  const wrap = document.createElement("div");
+  wrap.style.cssText =
+    "border: 1px solid #ddd; border-radius: 6px; padding: 14px 18px; " +
+    "background: #fafafa; max-width: 1200px; font-size: 13px;";
+
+  const lensModules = moduleSummaryRows
+    .filter((m) => m.stratum === currentLens)
+    .sort((a, b) => Number(b.n_tokens) - Number(a.n_tokens));
+
+  if (lensModules.length === 0) {
+    wrap.innerHTML = `<em style="color: #888;">No modules computed for lens <code>${currentLens}</code>.</em>`;
+    return wrap;
+  }
+
+  const headerHTML = `
+    <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px;">
+      <span style="font-weight: 600; color: #333;">${lensModules.length} modules in <code>${currentLens}</code> at γ=1.0</span>
+      <span style="font-size: 11px; color: #888;">click a row to open the anchor's entry above</span>
+    </div>`;
+
+  const rowsHTML = lensModules.map((m) => {
+    const anchorColor = classColor(m.anchor_cclass || "unclassed");
+    const dominantColor = classColor(m.dominant_class || "unclassed");
+    const sizeLabel = Number(m.n_tokens).toLocaleString();
+    return `
+      <div class="module-row"
+           data-anchor="${m.anchor_token_id}"
+           data-module-id="${m.module_id}"
+           data-module-size="${m.n_tokens}"
+           style="border-radius: 3px; background: white; border-left: 3px solid ${dominantColor}; margin: 2px 0;">
+        <div class="module-header"
+             style="display: grid; grid-template-columns: 56px 240px 120px 1fr 18px; gap: 10px;
+                    align-items: center; padding: 6px 8px; cursor: pointer;">
+          <span style="font-family: ui-monospace, Menlo, monospace; color: #888; font-size: 11px;">m${m.module_id}</span>
+          <span style="font-family: ui-monospace, Menlo, monospace; font-size: 11px;">
+            <span style="color: ${anchorColor}; font-weight: 600;">${m.anchor_cclass || "—"}</span>
+            ${m.anchor_region}
+          </span>
+          <span style="font-size: 11px; color: #555;">
+            <span style="color: ${dominantColor}; font-weight: 600;">${m.dominant_class}</span>-dominant
+          </span>
+          <span style="font-size: 11px; color: #777;">${sizeLabel} tokens · ${m.class_counts}</span>
+          <span class="expand-arrow" style="font-size: 12px; color: #aaa;">▸</span>
+        </div>
+      </div>`;
+  }).join("");
+
+  wrap.innerHTML = headerHTML + rowsHTML;
+
+  // SCREEN class hierarchy used to order chips in the module sentence —
+  // PLS first (anchor + co-anchor promoters), then proximal-enhancers,
+  // distal enhancers, accessibility/CTCF specials, then unclassed.
+  const classOrder = {"PLS": 0, "pELS": 1, "dELS": 2, "CA-H3K4me3": 3, "CA-CTCF": 4, "unclassed": 5};
+
+  // State: which module's sentence is currently expanded (one at a time).
+  let expandedRow = null;
+
+  async function renderModuleSentence(row) {
+    const moduleId = Number(row.dataset.moduleId);
+    const moduleSize = Number(row.dataset.moduleSize);
+    const stratum = currentLens;
+    // Query top-50 members by within-module centrality, joined with class info.
+    const members = arrowToRows(await coord.query(`
+      SELECT m.token_id, m.within_module_centrality, m.is_anchor,
+             v.region, v.cclass
+      FROM ${TABLE.modules} m
+      JOIN ${TABLE.regions} v ON m.token_id = v.token_id
+      WHERE m.stratum = '${stratum}' AND m.gamma = 1.0 AND m.module_id = ${moduleId}
+      ORDER BY m.within_module_centrality DESC
+      LIMIT 50
+    `));
+    // Re-sort: class hierarchy (PLS → pELS → dELS → CA-H3K4me3 → CA-CTCF → unclassed),
+    // then within each class by centrality desc. Anchor is always the first PLS by
+    // definition (highest centrality of its class group).
+    members.sort((a, b) => {
+      const ac = classOrder[a.cclass || "unclassed"] ?? 6;
+      const bc = classOrder[b.cclass || "unclassed"] ?? 6;
+      if (ac !== bc) return ac - bc;
+      return Number(b.within_module_centrality) - Number(a.within_module_centrality);
+    });
+
+    const chips = members.map((mem) => {
+      const cc = mem.cclass || "unclassed";
+      const color = classColor(cc);
+      const star = mem.is_anchor
+        ? '<span style="margin-right: 3px; color: #f59e0b;">★</span>'
+        : '';
+      return `<span class="member-chip"
+                    data-token-id="${mem.token_id}"
+                    title="centrality=${Number(mem.within_module_centrality).toFixed(4)}"
+                    style="display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0;
+                           border-left: 3px solid ${color}; background: white; border-radius: 3px;
+                           font-size: 11px; font-family: ui-monospace, Menlo, monospace;
+                           cursor: pointer; user-select: none;">
+        ${star}<span style="color: ${color}; font-weight: 600;">${cc}</span>
+        ${mem.region}
+      </span>`;
+    }).join("");
+
+    const stream = document.createElement("div");
+    stream.className = "module-stream";
+    stream.style.cssText =
+      "padding: 10px 14px; background: #f9fafb; border-top: 1px dashed #ccc; " +
+      "border-radius: 0 0 3px 3px;";
+    stream.innerHTML = `
+      <div style="font-size: 11px; color: #666; margin-bottom: 6px; line-height: 1.5;">
+        Module sentence — ${members.length} of ${moduleSize.toLocaleString()} members shown,
+        ordered by SCREEN class hierarchy (PLS → pELS → dELS → CA-* → unclassed) then by within-module centrality.
+        <span style="color: #f59e0b;">★</span> = anchor (highest within-module centrality).
+        Click any chip to open its dictionary entry.
+      </div>
+      <div>${chips}</div>
+      <div style="font-size: 10px; color: #888; margin-top: 6px; font-style: italic;">
+        These regions form a Leiden community in the corpus PMI graph for the
+        <code>${stratum}</code> lens. The "sentence" is the community read out as
+        a regulatory unit: anchor + class-grouped co-members. Order is grammatical
+        (class hierarchy + centrality), not genomic.
+      </div>`;
+
+    // Click handler for member chips: pick that token and scroll to card.
+    stream.querySelectorAll(".member-chip").forEach((chip) => {
+      chip.addEventListener("mouseenter", () => chip.style.background = "#fef3c7");
+      chip.addEventListener("mouseleave", () => chip.style.background = "white");
+      chip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const tokenId = Number(chip.dataset.tokenId);
+        pickedTokenSel.update(
+          clausePoint("token_id", tokenId, {source: pickTokenBridge})
+        );
+        document.querySelector("#observablehq-main")
+          ?.querySelector("h2#4-looking-up-an-entry")
+          ?.scrollIntoView({behavior: "smooth", block: "start"});
+      });
+    });
+
+    row.appendChild(stream);
+  }
+
+  // Hover + click logic. Click row → updates pickedTokenSel to anchor (existing)
+  // AND expands the row inline to show the module's sentence (new).
+  wrap.querySelectorAll(".module-row").forEach((row) => {
+    const header = row.querySelector(".module-header");
+    const arrow = row.querySelector(".expand-arrow");
+    header.addEventListener("mouseenter", () => header.style.background = "#f0f4f8");
+    header.addEventListener("mouseleave", () => header.style.background = "white");
+    header.addEventListener("click", async () => {
+      // Update the picked token to this module's anchor (existing behavior).
+      const anchorId = Number(row.dataset.anchor);
+      pickedTokenSel.update(
+        clausePoint("token_id", anchorId, {source: pickTokenBridge})
+      );
+      // Toggle inline expansion (new behavior).
+      const isExpanded = row === expandedRow;
+      if (expandedRow) {
+        expandedRow.querySelector(".module-stream")?.remove();
+        const prevArrow = expandedRow.querySelector(".expand-arrow");
+        if (prevArrow) prevArrow.textContent = "▸";
+        expandedRow = null;
+      }
+      if (!isExpanded) {
+        await renderModuleSentence(row);
+        if (arrow) arrow.textContent = "▾";
+        expandedRow = row;
+      }
+    });
+  });
+
+  return wrap;
+})();
+```
+
+${moduleCatalogue}
+
+<div style="font-size: 0.85em; color: #666; margin-top: 0.5em;">
+Click a module row to open its anchor's dictionary entry above <em>and</em> expand the row inline to show the module's "sentence" — its top-50 most-central members rendered as a flowing stream of class-colored chips, ordered by SCREEN class hierarchy then centrality. Switching the lens picker re-renders the catalogue. Module count varies dramatically by lens: ~7 modules in lineage-broad lenses (e.g., <code>featured_lineage_HepG2</code>) up to ~266 in <code>tf_bound_pan_cell</code>, where TF-binding patterns naturally form fine-grained communities.
 </div>

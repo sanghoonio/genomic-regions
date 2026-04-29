@@ -7,6 +7,8 @@ scripts/page.png
 scripts/page-clicked.png
 scripts/page-step5.png
 scripts/page-mode-*.png
+# All puppeteer test screenshots — regenerable by running the .mjs scripts.
+scripts/*.png
 
 # Parquets — too large to ship in the repo for now. Restore once we
 # decide on a hosted data location (column-pruned bundle, CDN, or build-time loader).
