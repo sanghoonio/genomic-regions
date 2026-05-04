@@ -1,0 +1,88 @@
+@import 'tailwindcss';
+
+@plugin "@tailwindcss/typography";
+@plugin "daisyui";
+
+@variant dark ([data-theme="regions-dark"] &);
+
+/* Custom DaisyUI theme — palette tuned for genomic data visualizations.
+   Primary teal echoes the SCREEN class color hue family used across plots;
+   neutrals stay close to a clean reading surface. */
+@plugin "daisyui/theme" {
+  name: "regions";
+  default: true;
+  color-scheme: light;
+
+  --color-primary: oklch(54.3% 0.093 194.8);
+  --color-primary-content: oklch(98% 0.005 194.8);
+
+  --color-secondary: oklch(34.7% 0.089 251.1);
+  --color-secondary-content: oklch(98% 0.005 251.1);
+
+  --color-accent: oklch(63.5% 0.14 41.5);
+  --color-accent-content: oklch(15% 0.02 41.5);
+
+  --color-neutral: oklch(31% 0.01 240);
+  --color-neutral-content: oklch(98% 0.005 240);
+
+  --color-info: oklch(45% 0.12 232);
+  --color-info-content: oklch(98% 0.005 232);
+
+  --color-success: oklch(56% 0.13 142);
+  --color-success-content: oklch(98% 0.005 142);
+
+  --color-warning: oklch(66% 0.16 70);
+  --color-warning-content: oklch(15% 0.02 70);
+
+  --color-error: oklch(58% 0.21 27);
+  --color-error-content: oklch(98% 0.005 27);
+
+  --color-base-100: oklch(100% 0 0);
+  --color-base-200: oklch(96% 0.005 240);
+  --color-base-300: oklch(90% 0.01 240);
+  --color-base-content: oklch(20% 0.01 240);
+}
+
+@plugin "daisyui/theme" {
+  name: "regions-dark";
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-primary: oklch(64% 0.1 194.8);
+  --color-primary-content: oklch(15% 0.02 194.8);
+
+  --color-secondary: oklch(60% 0.1 251.1);
+  --color-secondary-content: oklch(15% 0.02 251.1);
+
+  --color-accent: oklch(70% 0.16 41.5);
+  --color-accent-content: oklch(15% 0.02 41.5);
+
+  --color-neutral: oklch(28% 0.01 240);
+  --color-neutral-content: oklch(95% 0.005 240);
+
+  --color-info: oklch(60% 0.13 232);
+  --color-info-content: oklch(15% 0.02 232);
+
+  --color-success: oklch(65% 0.14 142);
+  --color-success-content: oklch(15% 0.02 142);
+
+  --color-warning: oklch(72% 0.17 70);
+  --color-warning-content: oklch(15% 0.02 70);
+
+  --color-error: oklch(64% 0.22 27);
+  --color-error-content: oklch(98% 0.005 27);
+
+  --color-base-100: oklch(20% 0.01 240);
+  --color-base-200: oklch(17% 0.01 240);
+  --color-base-300: oklch(28% 0.01 240);
+  --color-base-content: oklch(92% 0.005 240);
+}
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    background-color: var(--color-base-100);
+  }
+}

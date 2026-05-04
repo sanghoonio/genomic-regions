@@ -1,22 +1,45 @@
 {
-  "type": "module",
-  "private": true,
   "name": "genomic-regions",
+  "private": true,
   "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "clean": "rm -rf src/.observablehq/cache",
-    "build": "rm -rf dist && observable build",
-    "dev": "observable preview",
-    "deploy": "observable deploy",
-    "observable": "observable"
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@observablehq/framework": "^1.13.4",
-    "@uwdata/mosaic-core": "^0.24.2",
-    "@uwdata/mosaic-sql": "^0.24.2",
-    "@uwdata/vgplot": "^0.24.2"
+    "@observablehq/plot": "^0.6.17",
+    "@uwdata/mosaic-core": "^0.24.4",
+    "@uwdata/mosaic-sql": "^0.24.3",
+    "@uwdata/vgplot": "^0.24.4",
+    "embedding-atlas": "^0.20.0",
+    "lucide-react": "^1.14.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-router-dom": "^7.14.2"
   },
-  "engines": {
-    "node": ">=20.6"
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/vite": "^4.2.4",
+    "@types/node": "^24.12.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "daisyui": "^5.5.19",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.2.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.5.0",
+    "rollup": "^4.60.2",
+    "tailwindcss": "^4.2.4",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.58.2",
+    "vite": "^7.3.2",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
   }
 }
