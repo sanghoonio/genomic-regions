@@ -8,6 +8,8 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { EmbeddingViewMosaic } from 'embedding-atlas/react';
+// embedding-atlas's ViewportState is exported from the type-only index.
+type ViewportState = { x: number; y: number; scale: number };
 import { useMosaicCoordinator } from '../hooks/useMosaicCoordinator';
 import { TABLE } from '../lib/duckdb';
 import { ASSAY_COLOR_RANGE_WITH_UNKNOWN } from '../lib/colors';
@@ -36,6 +38,9 @@ export type FileUMAPProps = {
   headerChip?: ReactNode;
   /** Which categorical column drives the point color. Defaults to assay. */
   colorBy?: FileColorBy;
+  /** Optional viewport (pan + zoom) state passthrough — caller-managed. */
+  viewportState?: ViewportState | null;
+  onViewportState?: (v: ViewportState) => void;
 };
 
 export function FileUMAP({
@@ -44,6 +49,8 @@ export function FileUMAP({
   onSelectionChange,
   headerChip,
   colorBy = 'assay',
+  viewportState,
+  onViewportState,
 }: FileUMAPProps) {
   const { coordinator, isReady } = useMosaicCoordinator();
 
@@ -103,6 +110,8 @@ export function FileUMAP({
           width={containerWidth}
           height={height}
           config={{ autoLabelEnabled: false }}
+          viewportState={viewportState}
+          onViewportState={onViewportState}
           onSelection={(points) => {
             const ids = (points ?? [])
               .map((p) => p.identifier)

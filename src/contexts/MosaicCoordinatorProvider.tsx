@@ -20,7 +20,12 @@ export function MosaicCoordinatorProvider({ children }: { children: ReactNode })
 
   const getCoordinator = (): vg.Coordinator => {
     if (!coordinatorRef.current) {
-      coordinatorRef.current = new vg.Coordinator(vg.wasmConnector());
+      const coord = new vg.Coordinator(vg.wasmConnector());
+      coordinatorRef.current = coord;
+      // Register as the vgplot global singleton so high-level vg.plot()
+      // calls (used by the token raster) bind to the same DuckDB-WASM
+      // instance that EmbeddingViewMosaic talks to.
+      vg.coordinator(coord);
     }
     return coordinatorRef.current;
   };

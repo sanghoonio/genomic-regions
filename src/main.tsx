@@ -4,6 +4,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import './app.css';
 import App from './App';
 import { Home } from './pages/Home';
+import { Draft2 } from './pages/Draft2';
 import { MosaicCoordinatorProvider } from './contexts/MosaicCoordinatorProvider';
 
 const router = createBrowserRouter([
@@ -12,6 +13,7 @@ const router = createBrowserRouter([
     Component: App,
     children: [
       { index: true, Component: Home },
+      { path: 'draft-2', Component: Draft2 },
     ],
   },
 ]);

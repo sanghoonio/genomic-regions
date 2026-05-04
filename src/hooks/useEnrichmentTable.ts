@@ -11,12 +11,12 @@
 // [0, ENRICHMENT_BINS)). The table is rebuilt on each selection change.
 // Caller supplies a `customFileIds` array; nullish/empty disables the hook.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMosaicCoordinator } from './useMosaicCoordinator';
 import { TABLE } from '../lib/duckdb';
 import { ENRICHMENT_BINS } from '../lib/palettes';
 
-const ENRICHED_TABLE = 'dict_regions_enriched';
+const ENRICHED_TABLE_BASE = 'dict_regions_enriched';
 
 function escapeId(id: string): string {
   return `'${id.replace(/'/g, "''")}'`;
@@ -34,6 +34,13 @@ export function useEnrichmentTable(
   error: string | null;
 } {
   const { coordinator, isReady } = useMosaicCoordinator();
+  // Per-hook counter feeds a versioned table name so each rebuild gets a
+  // distinct DuckDB table (and a distinct cache key downstream). This
+  // avoids the need to call `coordinator.clear()` to invalidate stale
+  // pixel queries — that would abort every other in-flight query on the
+  // coordinator (UMAP loads, etc.) and leave them with 0 rows.
+  const counterRef = useRef(0);
+  const previousTableRef = useRef<string | null>(null);
   const [state, setState] = useState<{
     tableName: string | null;
     version: string | null;
@@ -59,7 +66,10 @@ export function useEnrichmentTable(
       return;
     }
     const idList = customFileIds.map(escapeId).join(',');
-    const sql = `CREATE OR REPLACE TABLE ${ENRICHED_TABLE} AS
+    counterRef.current += 1;
+    const versionedTable = `${ENRICHED_TABLE_BASE}_${counterRef.current}`;
+    const previousTable = previousTableRef.current;
+    const sql = `CREATE OR REPLACE TABLE ${versionedTable} AS
       WITH selection AS (
         SELECT id FROM ${TABLE.tokenizedCorpus} WHERE id IN (${idList})
       ),
@@ -109,13 +119,16 @@ export function useEnrichmentTable(
       .exec(sql)
       .then(() => {
         if (cancelled) return;
-        // The Mosaic coordinator caches query results by SQL string.
-        // CREATE OR REPLACE TABLE on the same name doesn't invalidate
-        // those cached rows, so EmbeddingViewMosaic would keep painting
-        // the previous enrichment. Clear the cache to force a refetch.
-        coordinator.clear({ cache: true });
+        previousTableRef.current = versionedTable;
+        if (previousTable) {
+          coordinator
+            .exec(`DROP TABLE IF EXISTS ${previousTable}`)
+            .catch(() => {
+              /* ignored — best-effort cleanup */
+            });
+        }
         setState({
-          tableName: ENRICHED_TABLE,
+          tableName: versionedTable,
           version: cacheKey,
           loading: false,
           error: null,

@@ -24,6 +24,8 @@
     "@eslint/js": "^10.0.1",
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.2.4",
+    "@types/d3-brush": "^3.0.6",
+    "@types/d3-selection": "^3.0.11",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

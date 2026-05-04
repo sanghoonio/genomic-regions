@@ -9,6 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { EmbeddingViewMosaic } from 'embedding-atlas/react';
+type ViewportState = { x: number; y: number; scale: number };
 import { useMosaicCoordinator } from '../hooks/useMosaicCoordinator';
 import { TABLE } from '../lib/duckdb';
 import { SCREEN_CLASS_COLOR_RANGE } from '../lib/colors';
@@ -49,6 +50,9 @@ export type RegionUMAPProps = {
    * change. Folded into the EmbeddingView `key` so it remounts and
    * re-reads the table when the same name is rebuilt in place. */
   enrichmentVersion?: string | null;
+  /** Optional viewport (pan + zoom) state passthrough — caller-managed. */
+  viewportState?: ViewportState | null;
+  onViewportState?: (v: ViewportState) => void;
 };
 
 export function RegionUMAP({
@@ -60,6 +64,8 @@ export function RegionUMAP({
   colorBy = 'cclass',
   enrichmentTable,
   enrichmentVersion,
+  viewportState,
+  onViewportState,
 }: RegionUMAPProps) {
   const { coordinator, isReady } = useMosaicCoordinator();
 
@@ -198,6 +204,8 @@ export function RegionUMAP({
           selection={highlightArray}
           width={containerWidth}
           height={height}
+          viewportState={viewportState}
+          onViewportState={onViewportState}
           config={{ autoLabelEnabled: false }}
           onSelection={(points) => {
             const id = points && points.length > 0 ? points[0].identifier : null;
