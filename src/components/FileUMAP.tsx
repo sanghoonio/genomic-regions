@@ -8,12 +8,15 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { EmbeddingViewMosaic } from 'embedding-atlas/react';
+import * as vg from '@uwdata/vgplot';
 // embedding-atlas's ViewportState is exported from the type-only index.
 type ViewportState = { x: number; y: number; scale: number };
 import { useMosaicCoordinator } from '../hooks/useMosaicCoordinator';
 import { TABLE } from '../lib/duckdb';
 import { ASSAY_COLOR_RANGE_WITH_UNKNOWN } from '../lib/colors';
 import { TABLEAU20 } from '../lib/palettes';
+import { pointInPolygonPredicate, boundingRect } from '../lib/umapBrush';
+import { UmapTooltip } from './UmapTooltip';
 
 export type FileColorBy = 'assay' | 'cell_line';
 
@@ -92,6 +95,69 @@ export function FileUMAP({
   // tall it actually rendered so EmbeddingViewMosaic gets a real pixel.
   const effectiveHeight = height ?? containerSize.height;
 
+  // Brush state — embedding-atlas emits the rect/polygon coords via
+  // `onRangeSelection` but doesn't auto-resolve them to point ids or
+  // visually highlight them. We mirror bedbase-ui's pattern: keep the
+  // rect controlled (so it stays drawn after release), and query
+  // DuckDB ourselves for the file ids inside the rect, then forward
+  // them through `onSelectionChange` so the parent can promote them
+  // to a custom file pool (which loops back as `highlightedFileIds`
+  // and renders the points highlighted).
+  type Rectangle = {
+    xMin: number;
+    xMax: number;
+    yMin: number;
+    yMax: number;
+  };
+  type PolygonPoint = { x: number; y: number };
+  type RangeValue = Rectangle | PolygonPoint[] | null;
+  const [rangeSelectionValue, setRangeSelectionValue] =
+    useState<RangeValue>(null);
+
+  const handleRangeSelection = async (value: RangeValue) => {
+    setRangeSelectionValue(value);
+    if (!value) {
+      onSelectionChange?.([]);
+      return;
+    }
+    // Build a Mosaic predicate matching the brush shape:
+    //   - rectangle → simple BETWEEN on x/y
+    //   - polygon (≥3 vertices) → bounding-box pre-filter + true
+    //     point-in-polygon (ray-cast SQL via the shared helper)
+    // vgplot's expression types are loose; `any` matches the helper
+    // signatures (same approach as bedbase-ui).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let predicate: any;
+    const xCol = vg.column('umap_x');
+    const yCol = vg.column('umap_y');
+    if (Array.isArray(value)) {
+      if (value.length < 3) return;
+      const bounds = boundingRect(value);
+      predicate = vg.and(
+        vg.isBetween(xCol, [bounds.xMin, bounds.xMax]),
+        vg.isBetween(yCol, [bounds.yMin, bounds.yMax]),
+        pointInPolygonPredicate(xCol, yCol, value),
+      );
+    } else {
+      predicate = vg.and(
+        vg.isBetween(xCol, [value.xMin, value.xMax]),
+        vg.isBetween(yCol, [value.yMin, value.yMax]),
+      );
+    }
+    try {
+      const q = vg.Query.from(TABLE.filesCategorized)
+        .select({ id: vg.column('id') })
+        .where(predicate);
+      const rows = (await coordinator.query(q, { type: 'json' })) as Array<{
+        id: string;
+      }>;
+      onSelectionChange?.(rows.map((r) => String(r.id)));
+    } catch {
+      // Coordinator can be cleared between queries; treat as empty.
+      onSelectionChange?.([]);
+    }
+  };
+
   return (
     <div
       ref={containerRef}
@@ -120,6 +186,10 @@ export function FileUMAP({
             tissue: 'tissue',
           }}
           categoryColors={FILE_COLOR_CONFIG[colorBy].palette}
+          customTooltip={{
+            class: UmapTooltip,
+            props: { identifierLabel: 'file' },
+          }}
           selection={highlightArray}
           width={containerWidth}
           height={effectiveHeight}
@@ -132,6 +202,8 @@ export function FileUMAP({
               .filter((id): id is string => typeof id === 'string');
             onSelectionChange?.(ids);
           }}
+          rangeSelectionValue={rangeSelectionValue}
+          onRangeSelection={handleRangeSelection}
         />
       )}
     </div>

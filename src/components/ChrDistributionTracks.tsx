@@ -96,6 +96,7 @@ export function ChrDistributionTracks({
 }: ChrDistributionTracksProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
 
   // Placeholder chromosome selection: only chr16 has data plumbed
   // through right now, so the picker is dummy state for now. Surfacing
@@ -181,7 +182,8 @@ export function ChrDistributionTracks({
         range: range2,
         label: `2 Mb window · ${N_BINS} bins (~${Math.round((range2[1] - range2[0]) / N_BINS / 1000)} kb)`,
         xTickFormat: (d) => `${(d / 1e6).toFixed(2)}M`,
-        emptyMessage: 'Pick a region on the UMAP to populate the 2 Mb window',
+        emptyMessage:
+          'Click a region on the region UMAP to populate the 2 Mb window',
       },
       {
         // Synthesize a non-null `bins` array so the connector pass
@@ -192,7 +194,8 @@ export function ChrDistributionTracks({
         range: range3,
         label: `20 kb window · tokens by SCREEN class`,
         xTickFormat: (d) => `${(d / 1e3).toFixed(2)}k`,
-        emptyMessage: 'Pick a region on the UMAP to populate the 20 kb window',
+        emptyMessage:
+          'Click a region on the region UMAP to populate the 20 kb window',
       },
     ];
 
@@ -216,6 +219,37 @@ export function ChrDistributionTracks({
       const innerLeft = MARGIN.left;
       const innerRight = width - MARGIN.right;
 
+      // Hover tooltip — direct DOM mutation so mousemove doesn't churn
+      // React state. Closures over wrapperRef + tooltipRef.
+      const showTooltip = (event: MouseEvent, html: string) => {
+        const tip = tooltipRef.current;
+        const wrap = wrapperRef.current;
+        if (!tip || !wrap) return;
+        tip.innerHTML = html;
+        const wRect = wrap.getBoundingClientRect();
+        const cx = event.clientX - wRect.left;
+        const cy = event.clientY - wRect.top;
+        // Show before measuring so getBoundingClientRect returns real
+        // dimensions; then clamp into the wrapper.
+        tip.style.visibility = 'visible';
+        const tRect = tip.getBoundingClientRect();
+        const offset = 12;
+        const x = Math.max(
+          4,
+          Math.min(wRect.width - tRect.width - 4, cx + offset),
+        );
+        const y = Math.max(
+          4,
+          Math.min(wRect.height - tRect.height - 4, cy + offset),
+        );
+        tip.style.left = `${x}px`;
+        tip.style.top = `${y}px`;
+      };
+      const hideTooltip = () => {
+        const tip = tooltipRef.current;
+        if (tip) tip.style.visibility = 'hidden';
+      };
+
       // Per-track scales — keyed by index so the connector pass below
       // can recover the parent's x scale to position the highlight rect.
       const xScales = tracks.map((t) =>
@@ -225,7 +259,17 @@ export function ChrDistributionTracks({
       // Tracks.
       tracks.forEach((track, i) => {
         const yOffset = i * (TRACK_HEIGHT + GAP_HEIGHT);
-        drawTrack(sel, track, xScales[i], yOffset, width, picked, hitTokenSet);
+        drawTrack(
+          sel,
+          track,
+          xScales[i],
+          yOffset,
+          width,
+          picked,
+          hitTokenSet,
+          showTooltip,
+          hideTooltip,
+        );
       });
 
       // Zoom-indicator connectors: parent[i] → child[i+1]. The drag
@@ -313,7 +357,7 @@ export function ChrDistributionTracks({
       }
     >
       <div className="p-2 flex flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-y-1.5 px-1 text-[10px] text-base-content/70">
+        <div className="flex flex-wrap items-center justify-between gap-y-1.5 px-1 text-xs text-base-content/70">
           <span className="inline-flex items-center gap-1.5">
             <span className="font-medium">Co-occurrence partners</span>
             <span>low</span>
@@ -350,12 +394,26 @@ export function ChrDistributionTracks({
         </div>
         <div
           ref={wrapperRef}
-          className={`w-full transition-opacity duration-200 ${
+          className={`w-full relative transition-opacity duration-200 ${
             histsBlurred ? 'opacity-50' : ''
           }`}
           aria-busy={histsBlurred}
         >
           <svg ref={svgRef} />
+          {/* Custom hover tooltip — populated and positioned via direct
+              DOM mutation by the d3 effect below; kept always-mounted
+              with visibility:hidden so we don't churn React state on
+              every mousemove. */}
+          <div
+            ref={tooltipRef}
+            className="absolute z-20 bg-base-100 border border-base-300 rounded-md shadow-md px-2 py-1.5 text-[11px] leading-snug text-base-content pointer-events-none"
+            style={{
+              visibility: 'hidden',
+              left: 0,
+              top: 0,
+              maxWidth: '240px',
+            }}
+          />
         </div>
       </div>
     </UMAPCard>
@@ -371,6 +429,8 @@ function drawTrack(
   width: number,
   picked: PickedRegion | null,
   hitTokenSet: ReadonlySet<number>,
+  showTooltip: (event: MouseEvent, html: string) => void,
+  hideTooltip: () => void,
 ) {
   const innerLeft = MARGIN.left;
   const innerRight = width - MARGIN.right;
@@ -390,7 +450,7 @@ function drawTrack(
     .attr('x', (innerLeft + innerRight) / 2)
     .attr('y', yOffset + 14)
     .attr('text-anchor', 'middle')
-    .style('font-size', '9px')
+    .style('font-size', '10px')
     .style('fill', 'currentColor')
     .style('opacity', 0.5)
     .text(track.label);
@@ -419,22 +479,21 @@ function drawTrack(
         .attr('width', (d) => Math.max(1, x(d.end) - x(d.start)))
         .attr('height', innerBottom - innerTop - lanePadding * 2)
         // Hits (picked + top NPMI partners) get a saturated SCREEN-class
-        // fill; non-hits stay clear with a thin class-tinted outline so
-        // they read as "this slot of universe is occupied" without
-        // competing with the hits visually.
-        .attr('fill', (d) =>
-          hitTokenSet.has(d.token_id) ? classColor(d.cclass) : 'none',
-        )
+        // fill; non-hits get the same fill at very low opacity so they
+        // still read as "this slot of universe is occupied" but recede
+        // visually instead of competing with the hits. Stroke restored
+        // to the class color so the rect edge follows the cclass cue.
+        .attr('fill', (d) => classColor(d.cclass))
+        .attr('fill-opacity', (d) => (hitTokenSet.has(d.token_id) ? 1 : 0.1))
         .attr('stroke', (d) => classColor(d.cclass))
         .attr('stroke-width', (d) => (hitTokenSet.has(d.token_id) ? 0.4 : 0.6))
         .attr('stroke-opacity', (d) =>
           hitTokenSet.has(d.token_id) ? 1 : 0.4,
         )
-        .append('title')
-        .text(
-          (d) =>
-            `${hitTokenSet.has(d.token_id) ? '★ ' : ''}token ${d.token_id} · ${d.cclass} · ${d.start.toLocaleString()}–${d.end.toLocaleString()} (${(d.end - d.start).toLocaleString()} bp)`,
-        );
+        .on('mouseenter mousemove', function (event, d) {
+          showTooltip(event, formatTokenTooltip(d, picked, hitTokenSet));
+        })
+        .on('mouseleave', hideTooltip);
     } else if (!picked && track.emptyMessage) {
       // No pick yet — show the prompt centered in the plot area.
       g.append('text')
@@ -465,14 +524,18 @@ function drawTrack(
       .attr('height', (d) => y(0) - y(d.universe))
       .attr('fill', (d) => (d.partners > 0 ? color(d.partners) : 'none'))
       .attr('stroke', '#888')
-      .attr('stroke-width', 0.25);
+      .attr('stroke-width', 0.25)
+      .on('mouseenter mousemove', function (event, d) {
+        showTooltip(event, formatBinTooltip(d));
+      })
+      .on('mouseleave', hideTooltip);
   } else if (track.emptyMessage) {
     g.append('text')
       .attr('x', (innerLeft + innerRight) / 2)
       .attr('y', (innerTop + innerBottom) / 2)
       .attr('dy', '0.35em')
       .attr('text-anchor', 'middle')
-      .style('font-size', '10px')
+      .style('font-size', '11px')
       .style('font-style', 'italic')
       .style('fill', 'currentColor')
       .style('opacity', 0.45)
@@ -498,7 +561,7 @@ function drawTrack(
   // X axis.
   g.append('g')
     .attr('transform', `translate(0, ${innerBottom})`)
-    .style('font-size', '9px')
+    .style('font-size', '10px')
     .call(
       axisBottom(x)
         .ticks(Math.max(2, Math.floor(width / 100)))
@@ -511,7 +574,7 @@ function drawTrack(
   if (!isTokensTrack) {
     g.append('g')
       .attr('transform', `translate(${innerLeft}, 0)`)
-      .style('font-size', '9px')
+      .style('font-size', '10px')
       .call(axisLeft(y).ticks(3).tickFormat((d) => `${d}`));
 
     g.append('text')
@@ -520,7 +583,7 @@ function drawTrack(
         `translate(${innerLeft - 36}, ${(innerTop + innerBottom) / 2}) rotate(-90)`,
       )
       .attr('text-anchor', 'middle')
-      .style('font-size', '9px')
+      .style('font-size', '10px')
       .style('fill', 'currentColor')
       .style('opacity', 0.7)
       .text('regions / bin');
@@ -761,6 +824,77 @@ function drawConnector(
           }),
       );
   }
+}
+
+// Format a (start, end) bp interval for tooltips. Picks units based on
+// the span's magnitude so a 360 kb track-1 bin reads in Mb while an
+// 80 bp deep-zoom bin reads in bp.
+function formatBinRange(start: number, end: number): string {
+  const span = end - start;
+  if (span >= 100_000) {
+    return `${(start / 1e6).toFixed(2)}–${(end / 1e6).toFixed(2)} Mb`;
+  }
+  if (span >= 1_000) {
+    return `${(start / 1e3).toFixed(1)}–${(end / 1e3).toFixed(1)} kb`;
+  }
+  return `${Math.round(start)}–${Math.round(end)} bp`;
+}
+
+// Signed distance from picked midpoint, scaled like the dict-panel
+// chip distances (kb under 1 Mb, Mb otherwise). Unicode minus for
+// nicer typography.
+function formatSignedDistance(deltaBp: number): string {
+  if (deltaBp === 0) return '0 bp';
+  const sign = deltaBp > 0 ? '+' : '−';
+  const abs = Math.abs(deltaBp);
+  if (abs < 1_000) return `${sign}${abs} bp`;
+  if (abs < 1_000_000) return `${sign}${(abs / 1_000).toFixed(0)} kb`;
+  return `${sign}${(abs / 1_000_000).toFixed(2)} Mb`;
+}
+
+// HTML body for a histogram-bar tooltip — coord range on top, then a
+// universe-region count, and the partner count when the bin has any.
+function formatBinTooltip(d: Bin): string {
+  const range = formatBinRange(d.start, d.end);
+  const universeLine = `<span class="text-base-content/60">${d.universe.toLocaleString()}</span> region${d.universe === 1 ? '' : 's'} in bin`;
+  const partnerLine =
+    d.partners > 0
+      ? `<div><span class="text-warning font-semibold">${d.partners.toLocaleString()}</span> co-occurrence partner${d.partners === 1 ? '' : 's'}</div>`
+      : '';
+  return `<div class="font-mono text-base-content">${escapeHtml(range)}</div><div>${universeLine}</div>${partnerLine}`;
+}
+
+// HTML body for a track-3 token tooltip — header reflects the token's
+// role (picked / partner / regular), then class + coords + (when
+// applicable) signed distance from the picked region.
+function formatTokenTooltip(
+  d: WindowToken,
+  picked: PickedRegion | null,
+  hitTokenSet: ReadonlySet<number>,
+): string {
+  const isPick = picked != null && d.token_id === picked.token_id;
+  const isHit = hitTokenSet.has(d.token_id);
+  const role = isPick
+    ? '<span class="text-primary font-semibold">⊙ picked</span>'
+    : isHit
+      ? '<span class="text-warning font-semibold">★ partner</span>'
+      : '<span class="text-base-content/50">universe token</span>';
+  const cclassRow = `<div><span class="text-base-content/60">class</span> <span class="font-semibold">${escapeHtml(d.cclass)}</span></div>`;
+  const coordsRow = `<div class="font-mono text-base-content">${d.start.toLocaleString()}–${d.end.toLocaleString()} <span class="text-base-content/50">(${(d.end - d.start).toLocaleString()} bp)</span></div>`;
+  const distRow =
+    picked && !isPick
+      ? `<div><span class="text-base-content/60">${formatSignedDistance(Math.round((d.start + d.end) / 2) - picked.midpoint)}</span> from pick</div>`
+      : '';
+  return `<div>${role}</div>${cclassRow}${coordsRow}${distRow}`;
+}
+
+// Minimal HTML escape — the tooltip content comes from numeric fields
+// + the cclass enum, so this is mostly defensive.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function buildTrapezoidPoints(

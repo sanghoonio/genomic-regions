@@ -17,7 +17,7 @@ export function UMAPGradientChip({
   rightLabel: string;
 }) {
   return (
-    <div className="inline-flex items-center gap-1.5 text-[10px] leading-tight font-medium bg-base-100 rounded-md border border-base-300 shadow-sm px-2 py-1">
+    <div className="inline-flex items-center gap-1.5 text-xs leading-tight font-medium bg-base-100 rounded-md border border-base-300 shadow-sm px-2 py-1">
       <span className="text-base-content/80 font-normal">{leftLabel}</span>
       <span
         className="inline-block h-2 w-20 rounded-sm border border-base-300/50"
@@ -32,7 +32,7 @@ export function UMAPGradientChip({
 
 export function UMAPTextChip({ label }: { label: string }) {
   return (
-    <div className="inline-flex items-center gap-1.5 text-[10px] leading-tight font-medium bg-base-100 rounded-md border border-base-300 shadow-sm px-2 py-1">
+    <div className="inline-flex items-center gap-1.5 text-xs leading-tight font-medium bg-base-100 rounded-md border border-base-300 shadow-sm px-2 py-1">
       <span className="text-base-content/80 font-normal">{label}</span>
     </div>
   );
@@ -63,7 +63,7 @@ export function UMAPLegendChip({
       : 'flex-col items-stretch gap-y-0.5 px-1.5';
   return (
     <div
-      className={`inline-flex ${layoutCls} text-[10px] leading-tight font-medium bg-base-100 rounded-md border border-base-300 shadow-sm py-1`}
+      className={`inline-flex ${layoutCls} text-xs leading-tight font-medium bg-base-100 rounded-md border border-base-300 shadow-sm py-1`}
     >
       {items.map((it) => {
         const isPinned = pinned?.has(it.label) ?? false;

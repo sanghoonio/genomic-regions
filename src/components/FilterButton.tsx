@@ -45,7 +45,7 @@ export function FilterButton({
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className={`inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium border px-1.5 py-0.5 rounded-md transition-colors cursor-pointer ${
+        className={`inline-flex items-center gap-1.5 -my-1 text-[11px] leading-none font-medium border px-1.5 py-0.5 rounded-md transition-colors cursor-pointer ${
           hasAny
             ? 'text-primary bg-primary/10 border-primary/30 hover:bg-primary/15'
             : 'text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border-base-300'
@@ -130,7 +130,7 @@ function Section({
 }) {
   return (
     <div>
-      <div className="px-3 py-1.5 bg-base-200 border-b border-base-300 text-[10px] font-bold text-base-content/60 uppercase tracking-wider">
+      <div className="px-3 py-1.5 bg-base-200 border-b border-base-300 text-[11px] font-bold text-base-content/60 uppercase tracking-wider">
         {title}
       </div>
       <ul className="py-1">{children}</ul>

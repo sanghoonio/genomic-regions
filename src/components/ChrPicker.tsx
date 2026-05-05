@@ -40,7 +40,7 @@ export function ChrPicker({
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className="inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
+        className="inline-flex items-center gap-1.5 -my-1 text-[11px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
         title="Chromosome"
       >
         <Dna size={11} />
@@ -79,7 +79,7 @@ export function ChrPicker({
                     >
                       <span>{c}</span>
                       {disabled && (
-                        <span className="text-[9px] text-base-content/30">
+                        <span className="text-[10px] text-base-content/30">
                           soon
                         </span>
                       )}

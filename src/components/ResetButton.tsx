@@ -15,7 +15,7 @@ export function ResetButton({
       type="button"
       onClick={onClick}
       title={title}
-      className="inline-flex items-center -my-1 text-[10px] leading-none font-medium text-error-content bg-error hover:bg-error/85 border border-error/80 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
+      className="inline-flex items-center -my-1 text-[11px] leading-none font-medium text-error-content bg-error hover:bg-error/85 border border-error/80 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
     >
       Reset
     </button>

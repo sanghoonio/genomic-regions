@@ -13,7 +13,94 @@ type ViewportState = { x: number; y: number; scale: number };
 import { useMosaicCoordinator } from '../hooks/useMosaicCoordinator';
 import { TABLE } from '../lib/duckdb';
 import { SCREEN_CLASS_COLOR_RANGE } from '../lib/colors';
+
+// embedding-atlas customOverlay class — vanilla JS lifecycle that draws
+// a marker for the picked region on top of the canvas. The proxy gives
+// us a (dataX, dataY) → (screenX, screenY) function that's refreshed
+// on every viewport pan/zoom, so the marker tracks the underlying point.
+type OverlayProxy = {
+  location: (x: number, y: number) => { x: number; y: number };
+  width: number;
+  height: number;
+};
+type PickedMarkerProps = {
+  proxy: OverlayProxy;
+  pickedX: number;
+  pickedY: number;
+  /** Fill color for the star — typically the picked region's SCREEN
+   * class color, so the marker reads as the underlying point itself
+   * rather than a separate annotation. */
+  color: string;
+};
+// Rounded-star marker — Lucide's Star icon path (24×24, centered at
+// (12, 12)) drawn as a solid filled star so it stands in for the
+// canvas point itself rather than annotating around it. Fill color is
+// passed in (typically the picked region's SCREEN class color), with a
+// thin same-color stroke for clean edges at small sizes.
+const STAR_PATH_D =
+  'M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 ' +
+  '1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 ' +
+  '2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-' +
+  '2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56' +
+  'l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 ' +
+  '.294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z';
+const STAR_BOX = 24;
+const STAR_HALF = STAR_BOX / 2;
+const STAR_SCALE = 1.15;
+class PickedRegionMarker {
+  private svg: SVGSVGElement;
+  private starGroup: SVGGElement;
+  private starPath: SVGPathElement;
+  private currentProps: PickedMarkerProps;
+  constructor(node: HTMLDivElement, props: PickedMarkerProps) {
+    this.currentProps = props;
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    this.svg = document.createElementNS(SVG_NS, 'svg');
+    this.svg.style.position = 'absolute';
+    this.svg.style.inset = '0';
+    this.svg.style.width = '100%';
+    this.svg.style.height = '100%';
+    this.svg.style.pointerEvents = 'none';
+    // Force above any embedding-atlas-internal layers (the selection
+    // halo is drawn on a layer that, by default, sits over the
+    // customOverlay node).
+    this.svg.style.zIndex = '50';
+    // Solid star with a `currentColor` stroke (≈ base-content, dark on
+    // light themes / light on dark) so the marker reads as a selected
+    // pin regardless of how close it sits to other similarly-colored
+    // points. vector-effect keeps the stroke crisp at any scale.
+    this.starGroup = document.createElementNS(SVG_NS, 'g');
+    this.starPath = document.createElementNS(SVG_NS, 'path');
+    this.starPath.setAttribute('d', STAR_PATH_D);
+    this.starPath.setAttribute('stroke', 'currentColor');
+    this.starPath.setAttribute('stroke-width', '2');
+    this.starPath.setAttribute('stroke-linejoin', 'round');
+    this.starPath.setAttribute('stroke-linecap', 'round');
+    this.starPath.setAttribute('vector-effect', 'non-scaling-stroke');
+    this.starGroup.appendChild(this.starPath);
+    this.svg.appendChild(this.starGroup);
+    node.appendChild(this.svg);
+    this.render();
+  }
+  update(props: PickedMarkerProps) {
+    this.currentProps = props;
+    this.render();
+  }
+  destroy() {
+    this.svg.remove();
+  }
+  private render() {
+    const { proxy, pickedX, pickedY, color } = this.currentProps;
+    const { x, y } = proxy.location(pickedX, pickedY);
+    this.starPath.setAttribute('fill', color);
+    this.starGroup.setAttribute(
+      'transform',
+      `translate(${x}, ${y}) scale(${STAR_SCALE}) translate(-${STAR_HALF}, -${STAR_HALF})`,
+    );
+  }
+}
 import { DIVERGING_PUOR } from '../lib/palettes';
+import { UmapTooltip } from './UmapTooltip';
 
 export type RegionColorBy = 'cclass' | 'enrichment';
 
@@ -57,6 +144,12 @@ export type RegionUMAPProps = {
   /** Optional viewport (pan + zoom) state passthrough — caller-managed. */
   viewportState?: ViewportState | null;
   onViewportState?: (v: ViewportState) => void;
+  /** UMAP coords + render color for the picked region. When supplied,
+   * an SVG star marker is drawn at that position (replacing the
+   * underlying canvas point visually) so the pick is distinguishable
+   * from its highlighted partners. The color is typically the
+   * region's SCREEN class color. */
+  pickedUmap?: { x: number; y: number; color: string } | null;
 };
 
 export function RegionUMAP({
@@ -70,6 +163,7 @@ export function RegionUMAP({
   enrichmentVersion,
   viewportState,
   onViewportState,
+  pickedUmap,
 }: RegionUMAPProps) {
   const { coordinator, isReady } = useMosaicCoordinator();
 
@@ -221,11 +315,32 @@ export function RegionUMAP({
           viewportState={viewportState}
           onViewportState={onViewportState}
           config={{ autoLabelEnabled: false }}
+          customTooltip={{
+            class: UmapTooltip,
+            props: { identifierLabel: 'token' },
+          }}
           // Hide embedding-atlas's bottom-right status bar (mode toggles,
           // branding link, point count). The region UMAP is purely a
           // click-to-pick surface — none of those affordances apply, and
           // the bar competes with the chr distribution card visually.
           theme={{ statusBar: false }}
+          // Overlay an SVG marker on the picked region's UMAP coords
+          // so the pick is distinguishable from its highlighted NPMI
+          // partners. Re-keyed on the picked coords so embedding-atlas
+          // tears down + remounts the overlay class when the pick
+          // changes (cheaper than diffing inside the class).
+          customOverlay={
+            pickedUmap
+              ? {
+                  class: PickedRegionMarker,
+                  props: {
+                    pickedX: pickedUmap.x,
+                    pickedY: pickedUmap.y,
+                    color: pickedUmap.color,
+                  },
+                }
+              : null
+          }
           onSelection={(points) => {
             const id = points && points.length > 0 ? points[0].identifier : null;
             setPickedId(id != null ? Number(id) : null);

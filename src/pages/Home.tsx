@@ -35,11 +35,7 @@ import { useTokenNpmiPartners } from '../hooks/usePartners';
 import { useUmapBounds } from '../hooks/useUmapBounds';
 import { ChrDistributionTracks } from '../components/ChrDistributionTracks';
 import { Section1Plot } from '../components/Section1Plot';
-import {
-  Section1ModeToggle,
-  type Section1Mode,
-} from '../components/Section1ModeToggle';
-import { IntervalPicker } from '../components/IntervalPicker';
+import type { Section1Mode } from '../components/Section1Plot';
 import { useFeaturedIntervals } from '../hooks/useFeaturedIntervals';
 import { useFeaturedFiles } from '../hooks/useFeaturedFiles';
 import type { CandidateInterval } from '../lib/candidateIntervals';
@@ -255,7 +251,7 @@ export function Home() {
             </a>
           </span>
         </div>
-        <p className="text-sm leading-snug text-base-content/80 mt-2">
+        <p className="text-sm leading-normal text-base-content/80 mt-2">
           What are genomic regions? Epigenomic experiments
           measure something biochemical along the genome (protein binding,
           open chromatin, histone marks) by capturing the DNA fragments at
@@ -274,7 +270,7 @@ export function Home() {
           dictionary is what makes co-occurrence queries tractable, and
           what each entry indexes.
         </p>
-        <p className="text-sm leading-snug text-base-content/80 mt-2">
+        <p className="text-sm leading-normal text-base-content/80 mt-2">
           A Word2Vec-style model called{' '}
           <span className="font-semibold">Region2Vec</span> learns each
           region's embedding from the tokens it co-occurs with across the
@@ -303,9 +299,16 @@ export function Home() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-3 items-start">
-        <div className="flex flex-col gap-2 pt-1 text-sm leading-snug text-base-content/80">
+        <div className="flex flex-col gap-3 pt-1 text-sm leading-normal text-base-content/80">
+          {/* Example-Intervals subsection — header scopes the whole
+              left column (biology blurb + controls), then the prose,
+              then the picker + view toggle, then a closing line that
+              points the reader at the plot on the right. */}
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+            Example Intervals
+          </h2>
           {interval && (
-            <p className="text-sm leading-snug text-base-content/80">
+            <p className="text-sm leading-normal text-base-content/80">
               Showing this for{' '}
               <span className="font-semibold">{interval.label}</span>
               {interval.narrative_caption
@@ -313,35 +316,59 @@ export function Home() {
                 : '.'}
             </p>
           )}
-          {interval && (
-            <div className="inline-flex flex-wrap items-center gap-1.5 py-2.5">
-              <IntervalPicker
-                intervals={intervals}
-                value={interval.interval_id}
-                onChange={(iv) => setPickedIntervalId(iv.interval_id)}
-                loading={intervalsLoading}
-                align="left"
-              />
-              <Section1ModeToggle
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2">
+              <span className="text-xs font-medium text-base-content/70 whitespace-nowrap min-w-[5rem]">
+                Interval
+              </span>
+              <select
+                className="select select-bordered select-xs flex-1 min-w-0"
+                value={interval?.interval_id ?? ''}
+                onChange={(e) => setPickedIntervalId(e.target.value)}
+                disabled={intervalsLoading || intervals.length === 0}
+              >
+                {intervals.map((iv) => (
+                  <option key={iv.interval_id} value={iv.interval_id}>
+                    {iv.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              <span className="text-xs font-medium text-base-content/70 whitespace-nowrap min-w-[5rem]">
+                View
+              </span>
+              <select
+                className="select select-bordered select-xs flex-1 min-w-0"
                 value={section1Mode}
-                onChange={setUserMode}
-                disabledModes={section1DisabledModes}
-                align="left"
-              />
-            </div>
-          )}
-          <p className="text-sm leading-snug text-base-content/80">
-            The full visual lives below. In{' '}
-            <button
-              type="button"
-              onClick={() => setUserMode('tokens')}
-              className="font-semibold underline decoration-dotted underline-offset-2 cursor-pointer hover:opacity-80 transition-opacity"
-            >
-              token view
-            </button>
-            , click a token on the right to make it the active pick; or
-            select one in the region UMAP below. Everything else on the
-            page updates to match.
+                onChange={(e) => setUserMode(e.target.value as Section1Mode)}
+              >
+                <option
+                  value="continuous"
+                  disabled={section1DisabledModes.includes('continuous')}
+                >
+                  Continuous (raw signal)
+                </option>
+                <option
+                  value="peaks"
+                  disabled={section1DisabledModes.includes('peaks')}
+                >
+                  Peaks (BED calls)
+                </option>
+                <option
+                  value="tokens"
+                  disabled={section1DisabledModes.includes('tokens')}
+                >
+                  Tokens (R2V universe)
+                </option>
+              </select>
+            </label>
+          </div>
+          <p className="text-sm leading-normal text-base-content/80">
+            The full visual lives below. In token view, click a token on
+            the right to make it the active pick; or select one in the
+            region UMAP below. Everything else on the page updates to
+            match.
           </p>
         </div>
         {interval && (
@@ -447,7 +474,9 @@ export function Home() {
                       key: 'enrichment',
                       label: 'Selection enrichment',
                       available: enrichmentAvailable,
-                      hint: enrichmentAvailable ? undefined : 'brush files',
+                      hint: enrichmentAvailable
+                        ? undefined
+                        : 'brush BED embedding first',
                     },
                   ]}
                 />
@@ -474,6 +503,17 @@ export function Home() {
               enrichmentVersion={enrichmentVersion}
               viewportState={regionViewport}
               onViewportState={setRegionViewport}
+              pickedUmap={
+                picked
+                  ? {
+                      x: picked.umap_x,
+                      y: picked.umap_y,
+                      color:
+                        SCREEN_CLASS_COLORS[picked.cclass] ??
+                        SCREEN_CLASS_COLORS.unclassed,
+                    }
+                  : null
+              }
               headerChip={
                 effectiveRegionColorBy === 'enrichment' ? (
                   <UMAPGradientChip
@@ -550,7 +590,7 @@ function LoadingSplash({
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <span className="text-[10px] text-base-content/50 tabular-nums">
+            <span className="text-xs text-base-content/50 tabular-nums">
               {progress
                 ? `${progress.done} / ${progress.total} · ${progress.label}`
                 : 'connecting to data…'}

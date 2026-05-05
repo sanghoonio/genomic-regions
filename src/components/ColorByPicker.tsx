@@ -42,7 +42,7 @@ export function ColorByPicker({
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className="inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
+        className="inline-flex items-center gap-1.5 -my-1 text-[11px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
         title="Color by…"
       >
         <Palette size={11} />
@@ -51,7 +51,7 @@ export function ColorByPicker({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-44 overflow-y-auto overscroll-contain max-h-80">
+          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-60 overflow-y-auto overscroll-contain max-h-80">
             <ul className="py-1">
               {options.map((opt) => {
                 const disabled = opt.available === false;
@@ -76,7 +76,7 @@ export function ColorByPicker({
                     >
                       <span>{opt.label}</span>
                       {opt.hint && (
-                        <span className="text-[10px] text-base-content/40">
+                        <span className="text-[11px] text-base-content/40">
                           {opt.hint}
                         </span>
                       )}

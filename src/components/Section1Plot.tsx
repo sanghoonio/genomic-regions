@@ -5,7 +5,7 @@
 //   tokens     → universe tokens that fired in each file, colored by class
 // The plot mounts via useEffect+ref so cleanup is explicit (Strict Mode).
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import * as Plot from '@observablehq/plot';
 import type { CandidateInterval } from '../lib/candidateIntervals';
 import type { FeaturedFile } from '../lib/types';
@@ -23,7 +23,7 @@ import {
   ASSAY_COLORS,
   classColor,
 } from '../lib/colors';
-import type { Section1Mode } from './Section1ModeToggle';
+export type Section1Mode = 'continuous' | 'peaks' | 'tokens';
 import type { PickedRegion } from './RegionUMAP';
 
 const UNIVERSE_LABEL = 'UNIVERSE';
@@ -37,6 +37,10 @@ export type Section1PlotProps = {
    * bar. The supplied PickedRegion is shaped to match what RegionUMAP
    * emits, so callers can wire this directly into the same picked state. */
   onPick?: (region: PickedRegion) => void;
+  /** Controls slot rendered in the SVG's marginTop band, anchored at
+   * the plot's left edge. Sits inline with the swatch legend on the
+   * right so the row reads as a single header strip for the plot. */
+  controls?: ReactNode;
 };
 
 export function Section1Plot({
@@ -44,6 +48,7 @@ export function Section1Plot({
   files,
   mode,
   onPick,
+  controls,
 }: Section1PlotProps) {
   const ref = useRef<HTMLDivElement>(null);
   const { regions, loading: regionsLoading, error: regionsError } =
@@ -186,7 +191,7 @@ export function Section1Plot({
           Plot.axisFy({
             anchor: 'left',
             dy: 5.5,
-            fontSize: 9,
+            fontSize: 10,
             tickSize: 6,
             ticks: baseRows,
           }),
@@ -256,7 +261,7 @@ export function Section1Plot({
       // Shrinks default axis tick / label font from 10 → 9 across all
       // three views (continuous's custom axisFy/axisX marks pick this
       // up too via inheritance).
-      style: { fontSize: '9px' },
+      style: { fontSize: '10px' },
       x: xScale,
       ...ySpec,
       color: colorSpec,
@@ -376,12 +381,13 @@ export function Section1Plot({
         className="w-full relative"
         aria-busy={regionsLoading}
       >
-        {/* Caption sits at the SVG's marginLeft (160 px) on top-0 so it
-            aligns with the y-axis tick column and reads as a label for
-            the plot — paired with the legend on the right edge. */}
-        <span className="absolute left-[160px] top-0 z-10 inline-flex items-center text-[10px] leading-tight font-semibold text-base-content/80 pointer-events-none">
-          Selected Interval
-        </span>
+        {/* Header strip sits in the SVG's marginTop=30 band: controls
+            on the left, legend on the right. */}
+        {controls && (
+          <div className="absolute left-[40px] top-0 z-10 pointer-events-auto">
+            {controls}
+          </div>
+        )}
         <div className="absolute right-1 top-0 z-10 pointer-events-auto">
           <SectionLegend mode={mode} />
         </div>
@@ -403,7 +409,7 @@ function SectionLegend({ mode }: { mode: Section1Mode }) {
         }))
       : Object.entries(ASSAY_COLORS).map(([label, color]) => ({ label, color }));
   return (
-    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-tight text-base-content/70">
+    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs leading-tight text-base-content/70">
       {items.map((it) => (
         <span key={it.label} className="inline-flex items-center gap-1">
           <span
