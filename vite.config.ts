@@ -12,4 +12,13 @@ export default defineConfig({
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
   },
+  // macOS fsevents has been silently dropping changes on this project,
+  // leaving HMR stale until a manual restart. Polling is slightly more
+  // CPU but reliable; tuned at 300ms for snappy feel.
+  server: {
+    watch: {
+      usePolling: true,
+      interval: 300,
+    },
+  },
 });

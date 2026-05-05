@@ -1,27 +1,27 @@
-// Small dropdown button rendered in a UMAPCard header's `actions` slot.
-// Lets the user switch which categorical column the embedding-atlas plot
-// colors by. Mirrors bedbase-ui's ColorByManager (chip variant).
+// Chromosome picker — chip-styled dropdown matching ColorByPicker /
+// IntervalPicker. Currently a placeholder: only chr16 has data wired up,
+// but the picker exposes all canonical hg38 chromosomes so the UI shows
+// where multi-chromosome support will land.
 
 import { useEffect, useRef, useState } from 'react';
-import { Palette } from 'lucide-react';
+import { Dna } from 'lucide-react';
 
-export type ColorByOption = {
-  key: string;
-  label: string;
-  /** When false, the option appears greyed out and isn't selectable. */
-  available?: boolean;
-  /** Optional muted hint shown next to the label, e.g. "(brush files first)". */
-  hint?: string;
-};
+// Canonical hg38 chromosomes: 1–22 + X, Y, M.
+const HG38_CHROMS: ReadonlyArray<string> = [
+  ...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`),
+  'chrX',
+  'chrY',
+  'chrM',
+];
 
-export function ColorByPicker({
+export function ChrPicker({
   value,
   onChange,
-  options,
+  align = 'right',
 }: {
   value: string;
-  onChange: (key: string) => void;
-  options: ReadonlyArray<ColorByOption>;
+  onChange: (chrom: string) => void;
+  align?: 'left' | 'right';
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -35,38 +35,41 @@ export function ColorByPicker({
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  const current = options.find((o) => o.key === value);
-
   return (
     <span className="relative inline-flex items-center" ref={ref}>
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
         className="inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
-        title="Color by…"
+        title="Chromosome"
       >
-        <Palette size={11} />
-        {current?.label ?? value}
+        <Dna size={11} />
+        {value}
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-44 overflow-y-auto overscroll-contain max-h-80">
+          <div
+            className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-32 overflow-y-auto overscroll-contain max-h-80`}
+          >
             <ul className="py-1">
-              {options.map((opt) => {
-                const disabled = opt.available === false;
-                const selected = opt.key === value;
+              {HG38_CHROMS.map((c) => {
+                const selected = c === value;
+                // Only chr16 is actually wired up to data; the rest are
+                // disabled placeholders so the UI shows where multi-chrom
+                // support will land.
+                const disabled = c !== 'chr16';
                 return (
-                  <li key={opt.key}>
+                  <li key={c}>
                     <button
                       type="button"
                       disabled={disabled}
                       onClick={() => {
                         if (disabled) return;
-                        onChange(opt.key);
+                        onChange(c);
                         setOpen(false);
                       }}
-                      className={`w-full text-left px-3 py-1 text-xs flex items-center justify-between gap-2 transition-colors ${
+                      className={`w-full text-left px-3 py-1 text-xs transition-colors ${
                         disabled
                           ? 'text-base-content/30 cursor-not-allowed'
                           : selected
@@ -74,12 +77,7 @@ export function ColorByPicker({
                             : 'hover:bg-base-200'
                       }`}
                     >
-                      <span>{opt.label}</span>
-                      {opt.hint && (
-                        <span className="text-[10px] text-base-content/40">
-                          {opt.hint}
-                        </span>
-                      )}
+                      {c}
                     </button>
                   </li>
                 );

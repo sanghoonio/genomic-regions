@@ -27,6 +27,8 @@ export type PickedRegion = {
 };
 
 export type RegionUMAPProps = {
+  /** Explicit pixel height. When omitted, the wrapper fills its flex
+   * parent and the canvas tracks the measured container size. */
   height?: number;
   onPickedChange?: (picked: PickedRegion | null) => void;
   /** Token ids to outline as a visible highlight — used to mark the picked
@@ -56,7 +58,7 @@ export type RegionUMAPProps = {
 };
 
 export function RegionUMAP({
-  height = 560,
+  height,
   onPickedChange,
   highlightedTokenIds,
   headerChip,
@@ -81,7 +83,10 @@ export function RegionUMAP({
   }, [highlightedTokenIds]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [containerSize, setContainerSize] = useState<{
+    width: number;
+    height: number;
+  }>({ width: 0, height: 0 });
 
   // Track the wrapper's box so we can hand explicit pixel sizes to
   // EmbeddingViewMosaic (it won't auto-fit otherwise).
@@ -90,12 +95,18 @@ export function RegionUMAP({
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        setContainerWidth(Math.max(0, Math.floor(entry.contentRect.width)));
+        setContainerSize({
+          width: Math.max(0, Math.floor(entry.contentRect.width)),
+          height: Math.max(0, Math.floor(entry.contentRect.height)),
+        });
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  const containerWidth = containerSize.width;
+  const effectiveHeight = height ?? containerSize.height;
 
   // Resolve the selected token's full row via DuckDB whenever the picked id
   // changes — embedding-atlas only gives us the identifier on click.
@@ -148,11 +159,8 @@ export function RegionUMAP({
   return (
     <div
       ref={containerRef}
-      // Fixed height, full width via flex; ResizeObserver feeds back the
-      // measured pixel width to EmbeddingViewMosaic.
-      // height is dynamic per prop; width comes from layout.
-      className="overflow-hidden bg-base-100 relative w-full"
-      style={{ height }}
+      className={`overflow-hidden rounded-b-lg bg-base-100 relative w-full ${height == null ? 'h-full min-h-0' : ''}`}
+      style={height != null ? { height } : undefined}
     >
       {headerChip && (
         <div className="absolute top-2 left-2 z-10">{headerChip}</div>
@@ -166,7 +174,7 @@ export function RegionUMAP({
         <div className="absolute inset-0 flex items-center justify-center">
           <span className="loading loading-spinner loading-md text-primary" />
         </div>
-      ) : containerWidth === 0 ? null : (
+      ) : containerWidth === 0 || effectiveHeight === 0 ? null : (
         <EmbeddingViewMosaic
           // Remount when the underlying table changes OR when the
           // enrichment table is rebuilt in place under a new selection
@@ -203,10 +211,15 @@ export function RegionUMAP({
           }
           selection={highlightArray}
           width={containerWidth}
-          height={height}
+          height={effectiveHeight}
           viewportState={viewportState}
           onViewportState={onViewportState}
           config={{ autoLabelEnabled: false }}
+          // Hide embedding-atlas's bottom-right status bar (mode toggles,
+          // branding link, point count). The region UMAP is purely a
+          // click-to-pick surface — none of those affordances apply, and
+          // the bar competes with the chr distribution card visually.
+          theme={{ statusBar: false }}
           onSelection={(points) => {
             const id = points && points.length > 0 ? points[0].identifier : null;
             setPickedId(id != null ? Number(id) : null);

@@ -26,6 +26,8 @@ const FILE_COLOR_CONFIG: Record<
 };
 
 export type FileUMAPProps = {
+  /** Explicit pixel height. When omitted, the wrapper fills its flex
+   * parent and the canvas tracks the measured container size. */
   height?: number;
   /** File ids to outline as a visible highlight — typically the current
    * stratum's file pool. Click semantics unchanged. */
@@ -44,7 +46,7 @@ export type FileUMAPProps = {
 };
 
 export function FileUMAP({
-  height = 480,
+  height,
   highlightedFileIds,
   onSelectionChange,
   headerChip,
@@ -64,25 +66,37 @@ export function FileUMAP({
   }, [highlightedFileIds]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [containerSize, setContainerSize] = useState<{
+    width: number;
+    height: number;
+  }>({ width: 0, height: 0 });
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        setContainerWidth(Math.max(0, Math.floor(entry.contentRect.width)));
+        setContainerSize({
+          width: Math.max(0, Math.floor(entry.contentRect.width)),
+          height: Math.max(0, Math.floor(entry.contentRect.height)),
+        });
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
+  const containerWidth = containerSize.width;
+  // When `height` is supplied we honour it exactly; otherwise the wrapper
+  // is `h-full` (flex stretch) and we let ResizeObserver tell us how
+  // tall it actually rendered so EmbeddingViewMosaic gets a real pixel.
+  const effectiveHeight = height ?? containerSize.height;
+
   return (
     <div
       ref={containerRef}
-      className="overflow-hidden bg-base-100 relative w-full"
-      style={{ height }}
+      className={`overflow-hidden rounded-b-lg bg-base-100 relative w-full ${height == null ? 'h-full min-h-0' : ''}`}
+      style={height != null ? { height } : undefined}
     >
       {headerChip && (
         <div className="absolute top-2 left-2 z-10">{headerChip}</div>
@@ -91,7 +105,7 @@ export function FileUMAP({
         <div className="absolute inset-0 flex items-center justify-center">
           <span className="loading loading-spinner loading-md text-primary" />
         </div>
-      ) : containerWidth === 0 ? null : (
+      ) : containerWidth === 0 || effectiveHeight === 0 ? null : (
         <EmbeddingViewMosaic
           coordinator={coordinator}
           table={TABLE.filesCategorized}
@@ -108,7 +122,7 @@ export function FileUMAP({
           categoryColors={FILE_COLOR_CONFIG[colorBy].palette}
           selection={highlightArray}
           width={containerWidth}
-          height={height}
+          height={effectiveHeight}
           config={{ autoLabelEnabled: false }}
           viewportState={viewportState}
           onViewportState={onViewportState}

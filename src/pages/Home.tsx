@@ -1,16 +1,19 @@
-// Phase 5+: interval picker + Section 1 toggle + RegionUMAP + DictCard.
-// Custom file pool comes from interactive legend pins (assay / cell_line)
-// or brush-selecting points on the FileUMAP — strata system removed.
+// Home — the dictionary's main page: top intro row (Section 1: signal /
+// peaks / tokens for a featured interval), then BED + region UMAPs
+// stacked on the left and chromosome distribution + dictionary entry on
+// the right. The earlier Reference draft is kept in
+// src/pages/Reference.tsx
+// as a comparison baseline but isn't routed anywhere right now.
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMosaicCoordinator } from '../hooks/useMosaicCoordinator';
-import { FilterButton } from '../components/FilterButton';
 import {
   RegionUMAP,
   type PickedRegion,
   type RegionColorBy,
 } from '../components/RegionUMAP';
 import { FileUMAP, type FileColorBy } from '../components/FileUMAP';
+import { FilterButton } from '../components/FilterButton';
 import {
   UMAPCard,
   UMAPLegendChip,
@@ -18,45 +21,52 @@ import {
   UMAPTextChip,
 } from '../components/UMAPHeaderChip';
 import { ColorByPicker } from '../components/ColorByPicker';
+// import { DictCard } from '../components/DictCard';  // parked
+import { DictPanel } from '../components/DictPanel';
 import {
   ASSAY_COLORS,
   SCREEN_CLASS_COLORS,
   SCREEN_CLASS_ORDER,
 } from '../lib/colors';
+import { DIVERGING_PUOR } from '../lib/palettes';
+import { TABLE } from '../lib/duckdb';
 import { useEnrichmentTable } from '../hooks/useEnrichmentTable';
 import { useCellLineLegend } from '../hooks/useCellLineLegend';
 import { useFilteredFileIds } from '../hooks/useFilteredFileIds';
-import { DIVERGING_PUOR } from '../lib/palettes';
-import { IntervalPicker } from '../components/IntervalPicker';
+import { useTokenNpmiPartners } from '../hooks/usePartners';
+import { useUmapBounds } from '../hooks/useUmapBounds';
+import { ChrDistributionTracks } from '../components/ChrDistributionTracks';
 import { Section1Plot } from '../components/Section1Plot';
 import {
   Section1ModeToggle,
   type Section1Mode,
 } from '../components/Section1ModeToggle';
-import { DictCard } from '../components/DictCard';
-import { ChrDistributionStrip } from '../components/ChrDistributionStrip';
+import { IntervalPicker } from '../components/IntervalPicker';
 import { useFeaturedIntervals } from '../hooks/useFeaturedIntervals';
 import { useFeaturedFiles } from '../hooks/useFeaturedFiles';
-import { useTokenNpmiPartners } from '../hooks/usePartners';
 import type { CandidateInterval } from '../lib/candidateIntervals';
+// Parked in favour of the pure-d3 three-track view below.
+// import { ChrDistributionVgplot } from '../components/ChrDistributionVgplot';
+// Token raster — sparse for now, parked while we iterate on chr-dist first.
+// import { useTokenRasterTable } from '../hooks/useTokenRasterTable';
+// import { TokenRasterPlot } from '../components/TokenRasterPlot';
 
 const FILE_COLOR_OPTIONS = [
   { key: 'assay', label: 'Assay' },
   { key: 'cell_line', label: 'Cell line' },
 ] as const;
 
-export function Home() {
-  const { isReady, error } = useMosaicCoordinator();
-  const { intervals, loading: intervalsLoading } = useFeaturedIntervals();
-  const { files } = useFeaturedFiles();
+// 1.0 = auto-fit; 0.67 zooms out slightly so the whole embedding sits
+// in the viewport with breathing room.
+const INITIAL_ZOOM = 0.67;
 
+type Viewport = { x: number; y: number; scale: number };
+
+export function Home() {
+  const { isReady } = useMosaicCoordinator();
   const [picked, setPicked] = useState<PickedRegion | null>(null);
 
-  // Two sources for the custom file pool, mutually exclusive — whichever
-  // was set last wins:
-  //   • brushedFileIds — explicit ids from a brush selection on the FileUMAP
-  //   • pinnedAssays / pinnedCellLines — categorical legend pins, AND'd
-  //     across fields and resolved to ids via useFilteredFileIds
+  // Pin/brush state — mirrors Home.
   const [brushedFileIds, setBrushedFileIds] = useState<string[]>([]);
   const [pinnedAssays, setPinnedAssays] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -68,7 +78,6 @@ export function Home() {
     pinnedAssays,
     pinnedCellLines,
   );
-
   const customFileIds = useMemo<string[] | null>(() => {
     if (brushedFileIds.length > 0) return brushedFileIds;
     if (pinnedFileIds && pinnedFileIds.length > 0) return pinnedFileIds;
@@ -78,15 +87,12 @@ export function Home() {
   const onFileSelectionChange = useCallback((ids: string[]) => {
     setBrushedFileIds(ids);
     if (ids.length > 0) {
-      // Brush wins over pins — clear them so the status chip shows a
-      // single source of truth.
       setPinnedAssays(new Set());
       setPinnedCellLines(new Set());
     }
   }, []);
-
   const togglePinAssay = useCallback((label: string) => {
-    setBrushedFileIds([]); // pin wins over brush
+    setBrushedFileIds([]);
     setPinnedAssays((prev) => {
       const next = new Set(prev);
       if (next.has(label)) next.delete(label);
@@ -109,9 +115,7 @@ export function Home() {
     setPinnedCellLines(new Set());
   }, []);
 
-  // Color-by state for both UMAPs. RegionUMAP's enrichment option is only
-  // meaningful when a custom file pool exists; we fall back to cclass
-  // automatically otherwise.
+  // Color modes.
   const [fileColorBy, setFileColorBy] = useState<FileColorBy>('assay');
   const { items: cellLineLegendItems } = useCellLineLegend();
   const [regionColorBy, setRegionColorBy] = useState<RegionColorBy>('cclass');
@@ -119,8 +123,6 @@ export function Home() {
   const effectiveRegionColorBy: RegionColorBy = enrichmentAvailable
     ? regionColorBy
     : 'cclass';
-  // Build the enrichment table only when needed — useEnrichmentTable
-  // short-circuits when the id list is empty.
   const {
     tableName: enrichmentTableName,
     version: enrichmentVersion,
@@ -129,46 +131,8 @@ export function Home() {
     effectiveRegionColorBy === 'enrichment' ? customFileIds : null,
   );
 
-  // Status-chip summary of active filter ("K562 + ATAC-seq · 4116 files").
-  const filterSummary = useMemo(() => {
-    if (brushedFileIds.length > 0) {
-      return `Brushed · ${brushedFileIds.length.toLocaleString()} files`;
-    }
-    const pins = [...pinnedAssays, ...pinnedCellLines];
-    if (pins.length === 0) return null;
-    const fileCount = pinnedFileIds?.length ?? 0;
-    return `${pins.join(' + ')} · ${fileCount.toLocaleString()} files`;
-  }, [brushedFileIds, pinnedAssays, pinnedCellLines, pinnedFileIds]);
-
-  // Track only the user's pick; derive the effective interval at render so
-  // we don't write state inside an effect for the default case.
-  const [pickedIntervalId, setPickedIntervalId] = useState<string | null>(null);
-  const interval = useMemo<CandidateInterval | null>(() => {
-    if (intervals.length === 0) return null;
-    const found = pickedIntervalId
-      ? intervals.find((i) => i.interval_id === pickedIntervalId)
-      : null;
-    return found ?? intervals[0];
-  }, [pickedIntervalId, intervals]);
-
-  const [userMode, setUserMode] = useState<Section1Mode>('continuous');
-  // Hub candidates lack featured_signal/tracks rows; force tokens mode so
-  // the user always sees something rather than an empty plot.
-  const isParquetInterval = interval?.source === 'parquet';
-  const mode: Section1Mode = isParquetInterval ? userMode : 'tokens';
-  const disabledModes: Section1Mode[] = isParquetInterval
-    ? []
-    : ['continuous', 'peaks'];
-
-  const onPicked = useCallback((p: PickedRegion | null) => {
-    setPicked(p);
-  }, []);
-
-  // RegionUMAP highlight: when a region is picked, outline it AND its
-  // top-30 NPMI partners so the user can see the same partner set that
-  // shows up as bars in the chr16 distribution strip — semantic location
-  // (UMAP) + spatial location (strip) at once. Nothing highlighted when
-  // no region is picked.
+  // Highlight: picked region + its top-30 NPMI partners (same set the
+  // Reference draft outlines).
   const { rows: pickedPartnerRows } = useTokenNpmiPartners(
     picked?.token_id ?? null,
     30,
@@ -184,158 +148,332 @@ export function Home() {
     return ids;
   }, [picked, pickedPartnerRows]);
 
+  // Viewport state — initialized to half-zoom once bounds load. embedding-
+  // atlas auto-fits while the viewport is null, so the first paint shows
+  // a centered fit and then snaps to half-zoom on next render. Acceptable.
+  const { fitViewport: fileFit } = useUmapBounds(TABLE.filesCategorized);
+  const { fitViewport: regionFit } = useUmapBounds(TABLE.regionsClassed);
+  const [fileViewport, setFileViewport] = useState<Viewport | null>(null);
+  const [regionViewport, setRegionViewport] = useState<Viewport | null>(null);
+  // Seed viewport from the bounds query when it lands. Standard
+  // sync-state-with-external-resource pattern; the lint rule flags it
+  // generically.
+  useEffect(() => {
+    if (fileFit && fileViewport === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFileViewport({ ...fileFit, scale: fileFit.scale * INITIAL_ZOOM });
+    }
+  }, [fileFit, fileViewport]);
+  useEffect(() => {
+    if (regionFit && regionViewport === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setRegionViewport({ ...regionFit, scale: regionFit.scale * INITIAL_ZOOM });
+    }
+  }, [regionFit, regionViewport]);
+
+  const onPicked = useCallback((p: PickedRegion | null) => {
+    setPicked(p);
+  }, []);
+
+  // Raster parked — see commented-out section in the JSX below.
+  // const { tableName: rasterTable, version: rasterVersion,
+  //         rowCount: rasterRowCount, loading: rasterLoading } =
+  //   useTokenRasterTable(customFileIds, fileColorBy);
+
+  const filterSummary = useMemo(() => {
+    if (brushedFileIds.length > 0) {
+      return `${brushedFileIds.length.toLocaleString()} selected`;
+    }
+    const pins = [...pinnedAssays, ...pinnedCellLines];
+    if (pins.length === 0) return null;
+    const fileCount = pinnedFileIds?.length ?? 0;
+    // Header space is tight; the FilterButton dropdown shows the actual
+    // pin labels, so the suffix only needs the resulting file count.
+    return `${fileCount.toLocaleString()} selected`;
+  }, [brushedFileIds, pinnedAssays, pinnedCellLines, pinnedFileIds]);
+
+  // Section 1 (raw signal → peaks → tokens) state — same data + picker
+  // pattern as the Reference draft. Lives above the UMAP/histogram grid
+  // and isn't part of the 100vh height calculation.
+  const { intervals, loading: intervalsLoading } = useFeaturedIntervals();
+  const { files: section1Files } = useFeaturedFiles();
+  const [pickedIntervalId, setPickedIntervalId] = useState<string | null>(null);
+  const interval = useMemo<CandidateInterval | null>(() => {
+    if (intervals.length === 0) return null;
+    const found = pickedIntervalId
+      ? intervals.find((i) => i.interval_id === pickedIntervalId)
+      : null;
+    return found ?? intervals[0];
+  }, [pickedIntervalId, intervals]);
+  const [userMode, setUserMode] = useState<Section1Mode>('continuous');
+  const isParquetInterval = interval?.source === 'parquet';
+  const section1Mode: Section1Mode = isParquetInterval ? userMode : 'tokens';
+  const section1DisabledModes: Section1Mode[] = isParquetInterval
+    ? []
+    : ['continuous', 'peaks'];
+
   return (
-    <main className="p-4 md:p-6 w-full flex flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-semibold">A Dictionary of Regulatory Genomics</h1>
-        <p className="text-base-content/70 text-sm mt-1">
-          chr16 R2V universe — interval-scoped demo. Pick an interval to see its
-          universe + per-file activations; click a region on the UMAP to look up
-          its dictionary entry.
+    <main className="py-4 px-6 w-full flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="text-2xl font-extralight">A Dictionary of Regulatory Genomics</h1>
+          <span className="ml-auto text-xs text-base-content/60">
+            <a
+              href="https://databio.org/"
+              target="_blank"
+              rel="noreferrer"
+              className="link link-hover"
+            >
+              databio.org
+            </a>{' '}
+            ·{' '}
+            <a
+              href="https://github.com/sanghoonio"
+              target="_blank"
+              rel="noreferrer"
+              className="link link-hover"
+            >
+              sanghoonio
+            </a>
+          </span>
+        </div>
+        <p className="text-sm leading-snug text-base-content/80 mt-2">
+          What are genomic regions? Epigenomic experiments
+          measure something biochemical along the genome (protein binding,
+          open chromatin, histone marks) by capturing the DNA fragments at
+          sites where that activity happens and sequencing them. Aligning
+          those reads
+          back to the reference gives a{' '}
+          <span className="font-semibold">continuous signal</span>: a
+          per-base count of how many fragments cover each position. To
+          summarize a file, researchers call{' '}
+          <span className="font-semibold">peaks</span>: discrete BED
+          regions where signal is high enough to count as an event, with
+          each lab reporting its own peak set per file. Different files
+          pick slightly different boundaries, so to compare regions across
+          the corpus we snap each peak to a shared universe of{' '}
+          <span className="font-semibold">tokens</span>. That shared
+          dictionary is what makes co-occurrence queries tractable, and
+          what each entry indexes.
+        </p>
+        <p className="text-sm leading-snug text-base-content/80 mt-2">
+          A Word2Vec-style model called{' '}
+          <span className="font-semibold">Region2Vec</span> learns each
+          region's embedding from the tokens it co-occurs with across the
+          BED corpus, and a single experiment is then represented as the
+          mean of its tokens' embeddings. Below, four panels make up the
+          dictionary: a <span className="font-semibold">file UMAP</span>{' '}
+          (each file's mean-pooled token embedding), a{' '}
+          <span className="font-semibold">region UMAP</span> (each region's
+          Region2Vec embedding), <span className="font-semibold">chromosome
+          distribution histograms</span> showing where regions co-occur
+          spatially along the chromosome, and a{' '}
+          <span className="font-semibold">dictionary entry</span> listing a
+          region's top co-occurrence partners, ranked by{' '}
+          <span className="font-semibold">NPMI</span>, a score for how
+          often two regions fire together across the corpus relative to
+          what you'd expect by chance. With these you can do two main things: pick a region, optionally narrowing the corpus by
+          brushing or pinning files, to see where its top co-occurring
+          partners sit semantically and spatially; or color the region
+          UMAP by per-region enrichment in a chosen file selection (the
+          log-odds of a region firing inside the selection versus
+          outside), aggregated by a biological attribute like assay or
+          cell line, to see which regions tend to fire in which kinds of
+          files, and where the model has learned coherent semantic
+          patterns.
         </p>
       </div>
 
-      {error && (
-        <div role="alert" className="alert alert-error">
-          <span className="font-mono text-sm">init error: {error}</span>
-        </div>
-      )}
-
-      {interval && (
-        <Section1Plot
-          interval={interval}
-          files={files}
-          mode={mode}
-          headerActions={
-            <span className="inline-flex items-center gap-1.5">
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-3 items-start">
+        <div className="flex flex-col gap-2 pt-1 text-sm leading-snug text-base-content/80">
+          {interval && (
+            <p className="text-sm leading-snug text-base-content/80">
+              Showing this for{' '}
+              <span className="font-semibold">{interval.label}</span>
+              {interval.narrative_caption
+                ? `: ${interval.narrative_caption}`
+                : '.'}
+            </p>
+          )}
+          {interval && (
+            <div className="inline-flex flex-wrap items-center gap-1.5 py-2.5">
               <IntervalPicker
                 intervals={intervals}
                 value={interval.interval_id}
                 onChange={(iv) => setPickedIntervalId(iv.interval_id)}
                 loading={intervalsLoading}
+                align="left"
               />
               <Section1ModeToggle
-                value={mode}
+                value={section1Mode}
                 onChange={setUserMode}
-                disabledModes={disabledModes}
+                disabledModes={section1DisabledModes}
+                align="left"
               />
-            </span>
-          }
-        />
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <UMAPCard
-          title="File embedding · BED corpus"
-          suffix={filterSummary ? `(${filterSummary})` : '(brush or pin to filter)'}
-          actions={
-            <span className="inline-flex items-center gap-1.5">
-              <FilterButton
-                pinnedAssays={pinnedAssays}
-                pinnedCellLines={pinnedCellLines}
-                brushedCount={brushedFileIds.length}
-                onTogglePinAssay={togglePinAssay}
-                onTogglePinCellLine={togglePinCellLine}
-                onClearBrush={() => setBrushedFileIds([])}
-                onClearAll={onClearAll}
-              />
-              <ColorByPicker
-                value={fileColorBy}
-                onChange={(k) => setFileColorBy(k as FileColorBy)}
-                options={FILE_COLOR_OPTIONS.map((o) => ({
-                  key: o.key,
-                  label: o.label,
-                }))}
-              />
-            </span>
-          }
-        >
-          <FileUMAP
-            height={540}
-            colorBy={fileColorBy}
-            highlightedFileIds={customFileIds ?? undefined}
-            onSelectionChange={onFileSelectionChange}
-            headerChip={
-              fileColorBy === 'assay' ? (
-                <UMAPLegendChip
-                  items={Object.entries(ASSAY_COLORS).map(([label, color]) => ({
-                    label,
-                    color,
-                  }))}
-                  pinned={pinnedAssays}
-                  onTogglePin={togglePinAssay}
-                />
-              ) : cellLineLegendItems ? (
-                <UMAPLegendChip
-                  items={cellLineLegendItems}
-                  pinned={pinnedCellLines}
-                  onTogglePin={togglePinCellLine}
-                />
-              ) : (
-                <UMAPTextChip label="Color: Cell line" />
-              )
-            }
+            </div>
+          )}
+          <p className="text-sm leading-snug text-base-content/80">
+            The full visual lives below. In{' '}
+            <button
+              type="button"
+              onClick={() => setUserMode('tokens')}
+              className="font-semibold underline decoration-dotted underline-offset-2 cursor-pointer hover:opacity-80 transition-opacity"
+            >
+              token view
+            </button>
+            , click a token on the right to make it the active pick; or
+            select one in the region UMAP below. Everything else on the
+            page updates to match.
+          </p>
+        </div>
+        {interval && (
+          <Section1Plot
+            interval={interval}
+            files={section1Files}
+            mode={section1Mode}
+            onPick={onPicked}
           />
-        </UMAPCard>
-        <UMAPCard
-          title="Region embedding · chr16 universe"
-          suffix={
-            effectiveRegionColorBy === 'enrichment' && enrichmentLoading
-              ? '(computing enrichment…)'
-              : picked && highlightTokenIds
-                ? `(picked + ${(highlightTokenIds.length - 1).toLocaleString()} NPMI partners highlighted)`
-                : '(click a region for its dictionary entry)'
-          }
-          actions={
-            <ColorByPicker
-              value={effectiveRegionColorBy}
-              onChange={(k) => setRegionColorBy(k as RegionColorBy)}
-              options={[
-                { key: 'cclass', label: 'SCREEN class' },
-                {
-                  key: 'enrichment',
-                  label: 'Selection enrichment',
-                  available: enrichmentAvailable,
-                  hint: enrichmentAvailable ? undefined : 'brush files',
-                },
-              ]}
-            />
-          }
-        >
-          <RegionUMAP
-            height={540}
-            onPickedChange={onPicked}
-            highlightedTokenIds={highlightTokenIds ?? undefined}
-            colorBy={effectiveRegionColorBy}
-            enrichmentTable={enrichmentTableName}
-            enrichmentVersion={enrichmentVersion}
-            headerChip={
-              effectiveRegionColorBy === 'enrichment' ? (
-                <UMAPGradientChip
-                  palette={DIVERGING_PUOR}
-                  leftLabel="depleted"
-                  rightLabel="enriched"
-                />
-              ) : (
-                <UMAPLegendChip
-                  items={SCREEN_CLASS_ORDER.filter((c) => c !== 'unclassed').map(
-                    (c) => ({ label: c, color: SCREEN_CLASS_COLORS[c] }),
-                  )}
-                />
-              )
-            }
-            cornerOverlay={
-              <DictCard
-                picked={picked}
-                isReady={isReady}
-                customFileIds={customFileIds}
-              />
-            }
-          />
-        </UMAPCard>
+        )}
       </div>
 
-      <ChrDistributionStrip picked={picked} customFileIds={customFileIds} />
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-2.5 items-start">
+        {/* Left column: BED + region UMAPs stacked. Column height is
+            max(600 px, 100vh) so on tall enough viewports the two cards
+            split a viewport-tall slot — the rest of the page (title,
+            right column overflow) scrolls normally around it. */}
+        <div className="flex flex-col gap-2.5 pt-4 pb-2 h-[max(600px,calc(100vh-24px))]">
+          <UMAPCard
+            className="flex-1 min-h-0"
+            title="BED File Embeddings"
+            suffix={filterSummary ? `(${filterSummary})` : undefined}
+            actions={
+              <span className="inline-flex items-center gap-1.5">
+                <FilterButton
+                  pinnedAssays={pinnedAssays}
+                  pinnedCellLines={pinnedCellLines}
+                  brushedCount={brushedFileIds.length}
+                  onTogglePinAssay={togglePinAssay}
+                  onTogglePinCellLine={togglePinCellLine}
+                  onClearBrush={() => setBrushedFileIds([])}
+                  onClearAll={onClearAll}
+                />
+                <ColorByPicker
+                  value={fileColorBy}
+                  onChange={(k) => setFileColorBy(k as FileColorBy)}
+                  options={FILE_COLOR_OPTIONS.map((o) => ({
+                    key: o.key,
+                    label: o.label,
+                  }))}
+                />
+              </span>
+            }
+          >
+            <FileUMAP
+              colorBy={fileColorBy}
+              highlightedFileIds={customFileIds ?? undefined}
+              onSelectionChange={onFileSelectionChange}
+              viewportState={fileViewport}
+              onViewportState={setFileViewport}
+              headerChip={
+                fileColorBy === 'assay' ? (
+                  <UMAPLegendChip
+                    items={Object.entries(ASSAY_COLORS).map(([label, color]) => ({
+                      label,
+                      color,
+                    }))}
+                    pinned={pinnedAssays}
+                    onTogglePin={togglePinAssay}
+                  />
+                ) : cellLineLegendItems ? (
+                  <UMAPLegendChip
+                    items={cellLineLegendItems}
+                    pinned={pinnedCellLines}
+                    onTogglePin={togglePinCellLine}
+                  />
+                ) : (
+                  <UMAPTextChip label="Color: Cell line" />
+                )
+              }
+            />
+          </UMAPCard>
+          <UMAPCard
+            className="flex-1 min-h-0"
+            title="Region Embeddings"
+            suffix={
+              effectiveRegionColorBy === 'enrichment' && enrichmentLoading
+                ? '(computing…)'
+                : picked && highlightTokenIds
+                  ? `(picked + ${(highlightTokenIds.length - 1).toLocaleString()} partners)`
+                  : undefined
+            }
+            actions={
+              <ColorByPicker
+                value={effectiveRegionColorBy}
+                onChange={(k) => setRegionColorBy(k as RegionColorBy)}
+                options={[
+                  { key: 'cclass', label: 'SCREEN class' },
+                  {
+                    key: 'enrichment',
+                    label: 'Selection enrichment',
+                    available: enrichmentAvailable,
+                    hint: enrichmentAvailable ? undefined : 'brush files',
+                  },
+                ]}
+              />
+            }
+          >
+            <RegionUMAP
+              onPickedChange={onPicked}
+              highlightedTokenIds={highlightTokenIds ?? undefined}
+              colorBy={effectiveRegionColorBy}
+              enrichmentTable={enrichmentTableName}
+              enrichmentVersion={enrichmentVersion}
+              viewportState={regionViewport}
+              onViewportState={setRegionViewport}
+              headerChip={
+                effectiveRegionColorBy === 'enrichment' ? (
+                  <UMAPGradientChip
+                    palette={DIVERGING_PUOR}
+                    leftLabel="depleted"
+                    rightLabel="enriched"
+                  />
+                ) : (
+                  <UMAPLegendChip
+                    items={SCREEN_CLASS_ORDER.filter((c) => c !== 'unclassed').map(
+                      (c) => ({ label: c, color: SCREEN_CLASS_COLORS[c] }),
+                    )}
+                  />
+                )
+              }
+              // Floating dictionary chip on the region UMAP — replaced
+              // by the DictPanel in the right column. Keep around in
+              // case we want it back.
+              // cornerOverlay={
+              //   <DictCard
+              //     picked={picked}
+              //     isReady={isReady}
+              //     customFileIds={customFileIds}
+              //   />
+              // }
+            />
+          </UMAPCard>
+        </div>
+
+        <div className="flex flex-col gap-2.5 pt-4 pb-2 h-[max(600px,calc(100vh-24px))] overflow-y-auto">
+          <ChrDistributionTracks
+            picked={picked}
+            customFileIds={customFileIds}
+          />
+          <DictPanel
+            picked={picked}
+            isReady={isReady}
+            customFileIds={customFileIds}
+          />
+          {/* ChrDistributionVgplot (parked) and TokenRasterPlot (parked)
+              live in components/ — revive when needed. */}
+        </div>
+      </div>
     </main>
   );
 }
+

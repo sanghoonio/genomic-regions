@@ -45,7 +45,7 @@ export function FilterButton({
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className={`inline-flex items-center gap-1.5 text-[10px] font-medium border px-2 py-1 rounded-md transition-colors cursor-pointer ${
+        className={`inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium border px-1.5 py-0.5 rounded-md transition-colors cursor-pointer ${
           hasAny
             ? 'text-primary bg-primary/10 border-primary/30 hover:bg-primary/15'
             : 'text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border-base-300'
@@ -61,7 +61,7 @@ export function FilterButton({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-64 overflow-y-auto max-h-96">
+          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-64 overflow-y-auto overscroll-contain max-h-96">
             {!hasAny ? (
               <div className="px-3 py-3 text-xs text-base-content/60 leading-snug">
                 No filter active. Click a swatch in the legend to pin a

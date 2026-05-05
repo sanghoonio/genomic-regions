@@ -1,10 +1,11 @@
-// Combine the 4 reference intervals from featured_intervals.parquet with
-// the 3 inline hub candidates into one ordered list for the picker.
+// All featured intervals (reference + hub candidates) now live in
+// featured_intervals.parquet, produced by stage 08 of the genomic-dict
+// pipeline. The picker reads them ordered by start position.
 
 import { useMemo } from 'react';
 import { useSqlQuery } from './useSqlQuery';
 import { TABLE } from '../lib/duckdb';
-import { HUB_CANDIDATES, type CandidateInterval } from '../lib/candidateIntervals';
+import type { CandidateInterval } from '../lib/candidateIntervals';
 
 type ParquetRow = {
   interval_id: string;
@@ -29,7 +30,7 @@ export function useFeaturedIntervals(): {
   );
 
   const intervals = useMemo<CandidateInterval[]>(() => {
-    const parquet: CandidateInterval[] = (rows ?? []).map((r) => ({
+    return (rows ?? []).map((r) => ({
       interval_id: r.interval_id,
       chrom: r.chrom,
       start: Number(r.start),
@@ -39,7 +40,6 @@ export function useFeaturedIntervals(): {
       n_universe_tokens: Number(r.n_universe_tokens),
       source: 'parquet',
     }));
-    return [...parquet, ...HUB_CANDIDATES];
   }, [rows]);
 
   return { intervals, loading, error };

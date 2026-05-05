@@ -23,10 +23,15 @@ export function Section1ModeToggle({
   value,
   onChange,
   disabledModes = [],
+  align = 'right',
 }: {
   value: Section1Mode;
   onChange: (m: Section1Mode) => void;
   disabledModes?: Section1Mode[];
+  /** Which edge of the trigger the dropdown anchors to. Default `right`
+   * matches the original UMAPCard `actions` slot; use `left` when the
+   * trigger sits on the left side of the page. */
+  align?: 'left' | 'right';
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -48,7 +53,7 @@ export function Section1ModeToggle({
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className="inline-flex items-center gap-1.5 text-[10px] font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-2 py-1 rounded-md transition-colors cursor-pointer"
+        className="inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer"
         title="View mode"
       >
         <Icon size={11} />
@@ -57,7 +62,9 @@ export function Section1ModeToggle({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-40 overflow-y-auto max-h-80">
+          <div
+            className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-40 overflow-y-auto overscroll-contain max-h-80`}
+          >
             <ul className="py-1">
               {MODES.map((m) => {
                 const { label, icon: ItemIcon } = MODE_LABELS[m];

@@ -11,6 +11,10 @@ export type IntervalPickerProps = {
   value: string | null; // interval_id
   onChange: (interval: CandidateInterval) => void;
   loading?: boolean;
+  /** Which edge of the trigger the dropdown anchors to. Default `right`
+   * matches the original UMAPCard `actions` slot (right-aligned chips);
+   * use `left` when the trigger sits on the left side of the page. */
+  align?: 'left' | 'right';
 };
 
 export function IntervalPicker({
@@ -18,6 +22,7 @@ export function IntervalPicker({
   value,
   onChange,
   loading,
+  align = 'right',
 }: IntervalPickerProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -45,7 +50,7 @@ export function IntervalPicker({
         type="button"
         disabled={loading || intervals.length === 0}
         onClick={() => setOpen((s) => !s)}
-        className="inline-flex items-center gap-1.5 text-[10px] font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-2 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed max-w-56 truncate"
+        className="inline-flex items-center gap-1.5 -my-1 text-[10px] leading-none font-medium text-base-content/70 hover:text-base-content bg-base-100 hover:bg-base-200 border border-base-300 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed max-w-56 truncate"
         title="Featured interval"
       >
         <MapPin size={11} className="shrink-0" />
@@ -54,7 +59,9 @@ export function IntervalPicker({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-72 overflow-y-auto max-h-96">
+          <div
+            className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 z-50 bg-base-100 border border-base-300 rounded-lg shadow-lg w-72 overflow-y-auto overscroll-contain max-h-96`}
+          >
             <ul className="py-1">
               {intervals.map((iv) => (
                 <li key={iv.interval_id}>

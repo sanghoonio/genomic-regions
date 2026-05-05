@@ -116,6 +116,7 @@ export function UMAPCard({
   suffix,
   actions,
   children,
+  className = '',
 }: {
   title: ReactNode;
   /** Muted text rendered after the bold title (e.g., a count). */
@@ -123,10 +124,20 @@ export function UMAPCard({
   /** Optional right-aligned slot in the header (e.g., a toggle). */
   actions?: ReactNode;
   children: ReactNode;
+  /** Extra classes appended to the outer card container — useful for
+   * `flex-1 min-h-0` when the card lives in a height-constrained flex
+   * column. */
+  className?: string;
 }) {
   return (
-    <div className="border border-base-300 rounded-lg overflow-clip bg-base-100 flex flex-col">
-      <div className="px-3 py-2 border-b border-base-300 bg-base-200 flex items-center justify-between gap-3 shrink-0">
+    <div
+      // overflow-visible on the outer card so dropdowns from header
+      // buttons (ColorByPicker, FilterButton, …) can escape the box
+      // instead of getting clipped by the card edge / hidden under the
+      // UMAP canvas's stacking context.
+      className={`border border-base-300 rounded-lg bg-base-100 flex flex-col ${className}`}
+    >
+      <div className="relative z-30 px-3 py-2 border-b border-base-300 bg-base-200 rounded-t-lg flex items-center justify-between gap-3 shrink-0">
         <span className="flex items-baseline gap-1.5 min-w-0">
           <span className="text-xs font-bold truncate">{title}</span>
           {suffix && (
@@ -135,7 +146,14 @@ export function UMAPCard({
             </span>
           )}
         </span>
-        {actions && <span className="shrink-0">{actions}</span>}
+        {actions && (
+          // Absolute-positioned so the buttons can't push the row's
+          // intrinsic height — header height is determined purely by
+          // the title regardless of whether actions are present.
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 inline-flex items-center gap-1.5 shrink-0">
+            {actions}
+          </span>
+        )}
       </div>
       {children}
     </div>

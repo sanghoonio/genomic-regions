@@ -5,7 +5,7 @@
 //   tokens     → universe tokens that fired in each file, colored by class
 // The plot mounts via useEffect+ref so cleanup is explicit (Strict Mode).
 
-import { useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import * as Plot from '@observablehq/plot';
 import type { CandidateInterval } from '../lib/candidateIntervals';
 import type { FeaturedFile } from '../lib/types';
@@ -24,7 +24,7 @@ import {
   classColor,
 } from '../lib/colors';
 import type { Section1Mode } from './Section1ModeToggle';
-import { UMAPCard, UMAPLegendChip } from './UMAPHeaderChip';
+import type { PickedRegion } from './RegionUMAP';
 
 const UNIVERSE_LABEL = 'UNIVERSE';
 const PAD_LABEL = ' '; // invisible facet pad row so axis ticks clear the bottom
@@ -33,16 +33,17 @@ export type Section1PlotProps = {
   interval: CandidateInterval;
   files: FeaturedFile[] | null;
   mode: Section1Mode;
-  /** Right-aligned controls slotted into the card header (e.g., the
-   * interval picker + view-mode toggle). */
-  headerActions?: ReactNode;
+  /** Fires when the user clicks a universe rect or a token-activation
+   * bar. The supplied PickedRegion is shaped to match what RegionUMAP
+   * emits, so callers can wire this directly into the same picked state. */
+  onPick?: (region: PickedRegion) => void;
 };
 
 export function Section1Plot({
   interval,
   files,
   mode,
-  headerActions,
+  onPick,
 }: Section1PlotProps) {
   const ref = useRef<HTMLDivElement>(null);
   const { regions, loading: regionsLoading, error: regionsError } =
@@ -248,7 +249,7 @@ export function Section1Plot({
     const plot = Plot.plot({
       width: el.clientWidth || 900,
       height: plotHeight,
-      marginLeft: 220,
+      marginLeft: 160,
       marginRight: 30,
       marginTop: 30,
       marginBottom: 40,
@@ -263,7 +264,75 @@ export function Section1Plot({
     });
 
     el.appendChild(plot);
+
+    // Wire click handlers on universe rects + token-activation bars so
+    // selecting in Section 1 mirrors RegionUMAP's onPickedChange. We
+    // walk the rendered SVG by mark order: universe rect is the first
+    // <g aria-label="rect">, token activations are the first
+    // <g aria-label="bar"> (in tokens mode). Plot preserves data order,
+    // so universeRows[i] / tokenActivations[i] map to the i-th rect.
+    const cleanups: Array<() => void> = [];
+    if (onPick) {
+      const svg = (plot.tagName === 'svg'
+        ? (plot as unknown as SVGSVGElement)
+        : (plot.querySelector('svg') as SVGSVGElement | null));
+      const emit = (r: { token_id: number; region: string; cclass: string; start: number; end: number }) => {
+        onPick({
+          token_id: r.token_id,
+          region: r.region,
+          cclass: r.cclass,
+          start: r.start,
+          end: r.end,
+          midpoint: Math.round((r.start + r.end) / 2),
+        });
+      };
+      if (svg) {
+        const universeG = svg.querySelector(
+          'g[aria-label="rect"]',
+        ) as SVGGElement | null;
+        if (universeG) {
+          const rects = Array.from(universeG.querySelectorAll('rect'));
+          rects.forEach((rect, i) => {
+            const row = universeRows[i];
+            if (!row) return;
+            (rect as SVGRectElement).style.cursor = 'pointer';
+            const handler = (e: Event) => {
+              e.stopPropagation();
+              emit(row);
+            };
+            rect.addEventListener('click', handler);
+            cleanups.push(() => rect.removeEventListener('click', handler));
+          });
+        }
+        if (isTokens && tokenActivations && regions) {
+          const regionsByToken = new Map(
+            regions.map((r) => [r.token_id, r]),
+          );
+          const barG = svg.querySelector(
+            'g[aria-label="bar"]',
+          ) as SVGGElement | null;
+          if (barG) {
+            const rects = Array.from(barG.querySelectorAll('rect'));
+            rects.forEach((rect, i) => {
+              const act = tokenActivations[i];
+              if (!act) return;
+              const region = regionsByToken.get(act.token_id);
+              if (!region) return;
+              (rect as SVGRectElement).style.cursor = 'pointer';
+              const handler = (e: Event) => {
+                e.stopPropagation();
+                emit(region);
+              };
+              rect.addEventListener('click', handler);
+              cleanups.push(() => rect.removeEventListener('click', handler));
+            });
+          }
+        }
+      }
+    }
+
     return () => {
+      cleanups.forEach((fn) => fn());
       plot.remove();
     };
   }, [
@@ -274,48 +343,34 @@ export function Section1Plot({
     mode,
     regions,
     universeRows,
+    onPick,
     tokenActivations,
     signalRows,
     peakRows,
     allFileLabels,
   ]);
 
-  const captionStat =
-    mode === 'tokens' && tokenActivations
-      ? `${tokenActivations.length.toLocaleString()} (file × token) activations across ${allFileLabels.length} files`
-      : mode === 'peaks' && peakRows
-        ? `${peakRows.length.toLocaleString()} peaks across ${
-            new Set(peakRows.map((r) => r.file_id)).size
-          } files`
-        : mode === 'continuous' && signalRows
-          ? `bigwig signal sampled across ${allFileLabels.length} files`
-          : null;
-
-  const intervalSuffix = `(${interval.chrom}:${interval.start.toLocaleString()}–${interval.end.toLocaleString()}${regions ? ` · ${regions.length} universe tokens` : ''}${captionStat ? ` · ${captionStat}` : ''})`;
-
   return (
-    <UMAPCard
-      title="Section 1 · raw signal → peaks → tokens"
-      suffix={intervalSuffix}
-      actions={headerActions}
-    >
-      <div className="p-2 flex flex-col gap-2">
-        {regionsError && (
-          <div role="alert" className="alert alert-error text-sm">
-            {regionsError}
-          </div>
-        )}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <p className="text-xs text-base-content/60 leading-snug min-w-0 flex-1">
-            {interval.narrative_caption ?? ' '}
-          </p>
-          <span className="shrink-0">
-            <SectionLegend mode={mode} />
-          </span>
+    <div className="flex flex-col gap-2">
+      {regionsError && (
+        <div role="alert" className="alert alert-error text-sm">
+          {regionsError}
         </div>
-        <div ref={ref} className="w-full" aria-busy={regionsLoading} />
+      )}
+      {/* Plot wrapper is `relative` so the legend can sit absolutely
+          in the SVG's marginTop area (which would otherwise be empty
+          space). Saves ~30 px of vertical padding above the bars
+          without disturbing Plot's alignment-sensitive margins. */}
+      <div
+        ref={ref}
+        className="w-full relative"
+        aria-busy={regionsLoading}
+      >
+        <div className="absolute right-1 top-0 z-10 pointer-events-auto">
+          <SectionLegend mode={mode} />
+        </div>
       </div>
-    </UMAPCard>
+    </div>
   );
 }
 
@@ -331,7 +386,20 @@ function SectionLegend({ mode }: { mode: Section1Mode }) {
           color: classColor(c),
         }))
       : Object.entries(ASSAY_COLORS).map(([label, color]) => ({ label, color }));
-  return <UMAPLegendChip items={items} orientation="horizontal" />;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-tight text-base-content/70">
+      {items.map((it) => (
+        <span key={it.label} className="inline-flex items-center gap-1">
+          <span
+            className="inline-block w-2 h-2 rounded-sm shrink-0"
+            // Color is data-driven — has to be inline.
+            style={{ backgroundColor: it.color }}
+          />
+          {it.label}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function fileLabelOf(f: FeaturedFile): string {
