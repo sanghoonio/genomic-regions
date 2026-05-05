@@ -26,10 +26,11 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-      - run: npm ci
+      # `npm install` rather than `npm ci`: the lockfile is generated on
+      # macOS and omits Linux-only optional native deps (@emnapi/*),
+      # which `npm ci` rejects as out-of-sync.
+      - run: npm install
       - run: npm run build
-        env:
-          OBSERVABLE_BASE: /genomic-regions/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

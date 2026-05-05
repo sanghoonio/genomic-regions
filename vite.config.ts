@@ -9,6 +9,9 @@ import wasm from 'vite-plugin-wasm';
 // vite-plugin-top-level-await plugin is dropped: it crashes on one of
 // embedding-atlas's worker chunks (`generateBundle` → undefined path).
 export default defineConfig({
+  // GitHub Pages deploys this app at https://sanghoonio.github.io/genomic-regions/
+  // so asset paths in the built index.html need the repo-name prefix.
+  base: '/genomic-regions/',
   plugins: [react(), tailwindcss(), wasm()],
   build: { target: 'esnext' },
   worker: {
