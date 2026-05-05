@@ -36,8 +36,8 @@ const N_BINS = 250;
 const TRACK_2_HALF_SPAN = 1_000_000; // 2 Mb total
 const TRACK_3_HALF_SPAN = 10_000;    // 20 kb total
 
-const TRACK_HEIGHT = 128;
-const GAP_HEIGHT = 38;
+const TRACK_HEIGHT = 120;
+const GAP_HEIGHT = 28;
 // Top margin reserves room for the centered label above the plot.
 const MARGIN = { top: 22, right: 16, bottom: 24, left: 50 };
 

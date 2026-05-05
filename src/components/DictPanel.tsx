@@ -1,9 +1,9 @@
 // Dictionary entry — a fudoki-inspired flow row of partner chips. The
 // picked region's chip sits in its natural genomic position within the
 // row; partners with smaller starts precede it, larger starts follow.
-// Width per chip encodes NPMI rank (top partner is widest, lowest is
-// narrowest). Clicking a partner pans the chr-distribution strip to
-// that partner's midpoint.
+// Width per chip encodes the rank of the partner region's bp size
+// (longest region widest, shortest narrowest). Clicking a partner pans
+// the chr-distribution strip to that partner's midpoint.
 //
 // Renders a placeholder when no region is picked.
 
@@ -31,9 +31,10 @@ const CCLASS_ABBREV: Record<string, string> = {
   unclassed: '—',
 };
 
-// Width encodes NPMI rank: top-rank partner is widest, lowest is
-// narrowest. Min is wide enough that the longest possible distance
-// label (e.g., "−12.34 Mb") never wraps, so the row stays a clean
+// Width encodes the rank of the partner region's bp size: the longest
+// region gets CHIP_MAX_WIDTH_PX, the shortest gets CHIP_MIN_WIDTH_PX.
+// Min is wide enough that the longest possible distance label
+// (e.g., "−12.34 Mb") never wraps, so the row stays a clean
 // single-line glyph per chip even at the lowest ranks.
 const CHIP_MIN_WIDTH_PX = 104;
 const CHIP_MAX_WIDTH_PX = 180;
@@ -180,22 +181,34 @@ export function DictPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
 
-  // Cursor-relative tooltip positioner — clamped to the panel's box so
-  // a tooltip on a chip near the right edge doesn't spill out of the
-  // card.
+  // Cursor-relative tooltip positioner — clamped to the panel's
+  // visible box. The panel is `overflow-y-auto` so absolute children
+  // scroll with the content; we add `scrollTop`/`scrollLeft` to the
+  // visible-area cursor coordinates so the tooltip lands at the
+  // cursor regardless of how far the strip has wrapped.
   const showTip: ShowTip = (event, html) => {
     const tip = tooltipRef.current;
     const wrap = containerRef.current;
     if (!tip || !wrap) return;
     tip.innerHTML = html;
     const wRect = wrap.getBoundingClientRect();
+    const visibleW = wrap.clientWidth;
+    const visibleH = wrap.clientHeight;
     const cx = event.clientX - wRect.left;
     const cy = event.clientY - wRect.top;
     tip.style.visibility = 'visible';
     const tRect = tip.getBoundingClientRect();
     const offset = 12;
-    tip.style.left = `${Math.max(4, Math.min(wRect.width - tRect.width - 4, cx + offset))}px`;
-    tip.style.top = `${Math.max(4, Math.min(wRect.height - tRect.height - 4, cy + offset))}px`;
+    const xVisible = Math.max(
+      4,
+      Math.min(visibleW - tRect.width - 4, cx + offset),
+    );
+    const yVisible = Math.max(
+      4,
+      Math.min(visibleH - tRect.height - 4, cy + offset),
+    );
+    tip.style.left = `${wrap.scrollLeft + xVisible}px`;
+    tip.style.top = `${wrap.scrollTop + yVisible}px`;
   };
   const hideTip: HideTip = () => {
     if (tooltipRef.current) tooltipRef.current.style.visibility = 'hidden';
@@ -281,8 +294,14 @@ function PickedContent({
           {picked.cclass}
         </span>
         <span className="text-xs text-base-content/60 tabular-nums">
-          token {picked.token_id.toLocaleString()} ·{' '}
           {(picked.end - picked.start).toLocaleString()} bp
+          {npmiMeta && !poolTooSmall && (
+            <>
+              {' · active in '}
+              {npmiMeta.n_files_active.toLocaleString()} of{' '}
+              {npmiMeta.n_files_in_pool.toLocaleString()} files
+            </>
+          )}
         </span>
       </div>
 
@@ -317,6 +336,12 @@ function PickedContent({
           score into <span className="font-mono">[−1, 1]</span> so it's
           comparable across token-pair frequencies. Higher = stronger
           co-occurrence relative to baseline rates.
+        </p>
+        <p className="text-[11px] text-base-content/55 leading-snug mb-1">
+          Tokens below are ordered by genomic start;{' '}
+          <span className="font-medium">width</span> ranks the partner
+          region's bp size, with longest widest and shortest narrowest.
+          Tokens are colored by SCREEN class.
         </p>
       {poolTooSmall ? (
         <div className="text-[11px] text-warning/90 bg-warning/10 border border-warning/30 rounded-md px-2 py-1.5 leading-snug">
@@ -359,12 +384,6 @@ function PickedContent({
           </p>
         </>
       )}
-        {npmiMeta && !poolTooSmall && (
-          <div className="text-[11px] text-base-content/50">
-            Token active in {npmiMeta.n_files_active.toLocaleString()} of{' '}
-            {npmiMeta.n_files_in_pool.toLocaleString()} files in pool.
-          </div>
-        )}
       </div>
     </>
   );
@@ -398,11 +417,18 @@ function PartnerStrip({
   // that splits before/after partners — fudoki-style "you are here".
   const entries: StripEntry[] = [];
   const N = partners.length;
-  for (const p of partners) {
-    // Map rank → width. Rank 1 (top NPMI) gets CHIP_MAX_WIDTH_PX;
-    // rank N gets CHIP_MIN_WIDTH_PX. Min is calibrated to never wrap
-    // the longest distance label.
-    const t = N > 1 ? (p.rank - 1) / (N - 1) : 0;
+  // Rank partners by bp width descending: the largest region gets
+  // bpRank 0 (→ CHIP_MAX_WIDTH_PX), the smallest gets bpRank N-1
+  // (→ CHIP_MIN_WIDTH_PX). NPMI rank is the tiebreak so the order is
+  // stable across ties.
+  const bpRankByOrigIdx = new Map<number, number>();
+  partners
+    .map((p, i) => ({ i, bp: p.partner_end - p.partner_start, npmiRank: p.rank }))
+    .sort((a, b) => b.bp - a.bp || a.npmiRank - b.npmiRank)
+    .forEach((entry, rankIdx) => bpRankByOrigIdx.set(entry.i, rankIdx));
+  partners.forEach((p, i) => {
+    const bpRank = bpRankByOrigIdx.get(i) ?? 0;
+    const t = N > 1 ? bpRank / (N - 1) : 0;
     const widthPx = Math.round(
       CHIP_MAX_WIDTH_PX - t * (CHIP_MAX_WIDTH_PX - CHIP_MIN_WIDTH_PX),
     );
@@ -414,7 +440,7 @@ function PartnerStrip({
       midpoint,
       widthPx,
     });
-  }
+  });
   entries.push({
     kind: 'picked',
     start: picked.start,

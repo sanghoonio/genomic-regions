@@ -317,7 +317,7 @@ export function Home() {
             </p>
           )}
           <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
               <span className="text-xs font-medium text-base-content/70 whitespace-nowrap min-w-[5rem]">
                 Interval
               </span>
@@ -333,8 +333,8 @@ export function Home() {
                   </option>
                 ))}
               </select>
-            </label>
-            <label className="flex items-center gap-2">
+            </div>
+            <div className="flex items-center gap-2">
               <span className="text-xs font-medium text-base-content/70 whitespace-nowrap min-w-[5rem]">
                 View
               </span>
@@ -362,7 +362,7 @@ export function Home() {
                   Tokens (R2V universe)
                 </option>
               </select>
-            </label>
+            </div>
           </div>
           <p className="text-sm leading-normal text-base-content/80">
             The full visual lives below. In token view, click a token on
