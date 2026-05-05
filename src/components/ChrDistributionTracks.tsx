@@ -11,26 +11,24 @@
 // top corners of the child's plot area — same trick UCSC uses for its
 // nested zoom views.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { ChrPicker } from './ChrPicker';
+import { ResetButton } from './ResetButton';
 import { axisBottom, axisLeft } from 'd3-axis';
 import { scaleLinear, scaleSequential } from 'd3-scale';
 import { interpolateYlOrRd } from 'd3-scale-chromatic';
 import { select } from 'd3-selection';
+import { drag as d3Drag } from 'd3-drag';
 import {
   CHR16_END,
   composeBins,
   useChr16PartnerPositions,
   useChr16UniverseBins,
+  useChr16WindowTokens,
+  type WindowToken,
 } from '../hooks/useChrDistribution';
 import { useChrDistZoomBins } from '../hooks/useChrDistZoomBins';
-// Parked alongside the WindowContext render below; uncomment when ready.
-// import {
-//   useChrWindowActivations,
-//   type FileGroup,
-//   type WindowUniverseRow,
-// } from '../hooks/useChrWindowActivations';
-// import { classColor } from '../lib/colors';
+import { classColor } from '../lib/colors';
 import type { PickedRegion } from './RegionUMAP';
 import { UMAPCard } from './UMAPHeaderChip';
 
@@ -50,13 +48,6 @@ const YLORRD_STOPS = [
   '#fc4e2a', '#e31a1c', '#bd0026', '#800026',
 ];
 
-// Context section sizes — universe row stays fixed below the histograms;
-// file rows live in a scrollable container at FILE_LIST_HEIGHT viewport.
-// Parked alongside WindowContext.
-// const UNIVERSE_ROW_HEIGHT = 22;
-// const FILE_ROW_HEIGHT = 10;
-// const FILE_LIST_HEIGHT = 320;
-
 type Bin = {
   binIndex: number;
   start: number;
@@ -73,16 +64,35 @@ type TrackSpec = {
   /** Centered placeholder text drawn in the plot area when `bins` is
    * null. Lets each track explain what selection would fill it. */
   emptyMessage?: string;
+  /** When set, the track renders as token rectangles colored by
+   * SCREEN class instead of binned histogram bars. Used for the
+   * deepest zoom where binning is overkill. */
+  tokens?: WindowToken[] | null;
 };
 
 export type ChrDistributionTracksProps = {
   picked: PickedRegion | null;
   customFileIds?: ReadonlyArray<string> | null;
+  /** Token IDs treated as "hits" in the deepest token track (picked
+   * region + its top NPMI partners). Tokens not in this set still
+   * render but as a clear outline-only rect for spatial context. */
+  highlightTokenIds?: ReadonlyArray<number> | null;
+  /** Controlled zoom-window centers — owned by the parent so other
+   * components (e.g., DictPanel) can pan the strip programmatically. */
+  window2Center: number | null;
+  window3Center: number | null;
+  setWindow2Center: Dispatch<SetStateAction<number | null>>;
+  setWindow3Center: Dispatch<SetStateAction<number | null>>;
 };
 
 export function ChrDistributionTracks({
   picked,
   customFileIds,
+  highlightTokenIds,
+  window2Center,
+  window3Center,
+  setWindow2Center,
+  setWindow3Center,
 }: ChrDistributionTracksProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -94,29 +104,34 @@ export function ChrDistributionTracks({
 
   // ---- data ------------------------------------------------------------
   const { bins: universe } = useChr16UniverseBins(N_BINS);
-  const { positions: partnerPositions } = useChr16PartnerPositions(
-    picked?.token_id ?? null,
-    'NPMI',
-    30,
-    customFileIds,
-  );
+  const { positions: partnerPositions, loading: partnersLoading } =
+    useChr16PartnerPositions(
+      picked?.token_id ?? null,
+      'NPMI',
+      30,
+      customFileIds,
+    );
+  // Blur every track while NPMI co-occurrence is recomputing for the
+  // active pick — the YlOrRd partner-count fills + the token track's
+  // hit-vs-non-hit styling all read from this same partner set.
+  const histsBlurred = !!picked && partnersLoading;
   const fullBins = useMemo(
     () => composeBins(universe, partnerPositions, N_BINS),
     [universe, partnerPositions],
   );
 
   const window2 = useMemo<[number, number] | null>(() => {
-    if (!picked) return null;
-    const lo = Math.max(0, picked.midpoint - TRACK_2_HALF_SPAN);
-    const hi = Math.min(CHR16_END, picked.midpoint + TRACK_2_HALF_SPAN);
+    if (window2Center == null) return null;
+    const lo = Math.max(0, window2Center - TRACK_2_HALF_SPAN);
+    const hi = Math.min(CHR16_END, window2Center + TRACK_2_HALF_SPAN);
     return [lo, hi];
-  }, [picked]);
+  }, [window2Center]);
   const window3 = useMemo<[number, number] | null>(() => {
-    if (!picked) return null;
-    const lo = Math.max(0, picked.midpoint - TRACK_3_HALF_SPAN);
-    const hi = Math.min(CHR16_END, picked.midpoint + TRACK_3_HALF_SPAN);
+    if (window3Center == null) return null;
+    const lo = Math.max(0, window3Center - TRACK_3_HALF_SPAN);
+    const hi = Math.min(CHR16_END, window3Center + TRACK_3_HALF_SPAN);
     return [lo, hi];
-  }, [picked]);
+  }, [window3Center]);
 
   const { bins: bins2 } = useChrDistZoomBins(
     window2,
@@ -124,22 +139,15 @@ export function ChrDistributionTracks({
     customFileIds,
     N_BINS,
   );
-  const { bins: bins3 } = useChrDistZoomBins(
-    window3,
-    picked,
-    customFileIds,
-    N_BINS,
+  // Track 3 swaps the binned histogram for individual token rectangles
+  // — at 20 kb / 250 bins each bin is ~80 bp, so most bins hold one
+  // token anyway. Show tokens at their actual coords colored by
+  // SCREEN class instead.
+  const { tokens: window3Tokens } = useChr16WindowTokens(window3);
+  const hitTokenSet = useMemo(
+    () => new Set<number>(highlightTokenIds ?? []),
+    [highlightTokenIds],
   );
-
-  // Per-file activations + universe regions inside track 3's window —
-  // parked along with the WindowContext render. Revive together when
-  // ready to bring the file-tracks list back.
-  // const {
-  //   universe: windowUniverse,
-  //   files,
-  //   totalFiles,
-  //   loading: contextLoading,
-  // } = useChrWindowActivations(window3, customFileIds);
 
   // ---- d3 render -------------------------------------------------------
   useEffect(() => {
@@ -176,9 +184,13 @@ export function ChrDistributionTracks({
         emptyMessage: 'Pick a region on the UMAP to populate the 2 Mb window',
       },
       {
-        bins: picked ? bins3 : null,
+        // Synthesize a non-null `bins` array so the connector pass
+        // still runs (it gates on parent.bins && child.bins). The
+        // bars themselves come from `tokens` instead.
+        bins: picked ? [] : null,
+        tokens: picked ? window3Tokens : null,
         range: range3,
-        label: `20 kb window · ${N_BINS} bins (~${Math.round((range3[1] - range3[0]) / N_BINS)} bp)`,
+        label: `20 kb window · tokens by SCREEN class`,
         xTickFormat: (d) => `${(d / 1e3).toFixed(2)}k`,
         emptyMessage: 'Pick a region on the UMAP to populate the 20 kb window',
       },
@@ -213,16 +225,46 @@ export function ChrDistributionTracks({
       // Tracks.
       tracks.forEach((track, i) => {
         const yOffset = i * (TRACK_HEIGHT + GAP_HEIGHT);
-        drawTrack(sel, track, xScales[i], yOffset, width, picked);
+        drawTrack(sel, track, xScales[i], yOffset, width, picked, hitTokenSet);
       });
 
-      // Zoom-indicator connectors: parent[i] → child[i+1].
+      // Zoom-indicator connectors: parent[i] → child[i+1]. The drag
+      // handler shifts the child's center to an absolute value (start
+      // center + cumulative pixel offset / pxPerBp). Track 1's drag
+      // also carries the deeper window along by the same delta —
+      // strip-chart style.
       for (let i = 0; i < tracks.length - 1; i++) {
         const parent = tracks[i];
         const child = tracks[i + 1];
         if (!parent.bins || !child.bins) continue;
         const parentY = i * (TRACK_HEIGHT + GAP_HEIGHT);
         const childY = (i + 1) * (TRACK_HEIGHT + GAP_HEIGHT);
+        // Closure-captured starts populated on dragStart, cleared on
+        // dragEnd. Absolute values avoid drift from per-tick deltas.
+        const setAbsolute = (newCenter2: number, newCenter3: number) => {
+          const c2 = Math.max(0, Math.min(CHR16_END, newCenter2));
+          const c3 = Math.max(0, Math.min(CHR16_END, newCenter3));
+          if (i === 0) {
+            setWindow2Center(c2);
+            setWindow3Center(c3);
+          } else {
+            setWindow3Center(c3);
+          }
+        };
+        // Blur every track *below* the connector's parent — those are
+        // the ones whose data is about to change. Direct DOM mutation
+        // so we don't churn React state mid-drag (which would remount
+        // the SVG and break d3-drag's pointer container).
+        const setDragBlur = (active: boolean) => {
+          for (let j = 0; j < tracks.length; j++) {
+            const tg = sel.select<SVGGElement>(`g.track-${j}`);
+            if (active && j > i) {
+              tg.style('filter', 'blur(2px)').style('opacity', 0.5);
+            } else {
+              tg.style('filter', null).style('opacity', null);
+            }
+          }
+        };
         drawConnector(
           sel,
           xScales[i],
@@ -231,10 +273,21 @@ export function ChrDistributionTracks({
           childY,
           innerLeft,
           innerRight,
+          {
+            // Captured at drag start so absolute math works against the
+            // exact center the user grabbed, not a state value mid-flight.
+            getStartCenters: () => ({
+              c2: window2Center ?? 0,
+              c3: window3Center ?? 0,
+            }),
+            applyAbsolute: setAbsolute,
+            isTrackOne: i === 0,
+            setDragBlur,
+          },
         );
       }
     }
-  }, [fullBins, bins2, bins3, picked, window2, window3]);
+  }, [fullBins, bins2, window3Tokens, picked, window2, window3]);
 
   const poolLabel =
     customFileIds && customFileIds.length > 0
@@ -246,13 +299,23 @@ export function ChrDistributionTracks({
       title="Chromosome Distributions"
       suffix={`(pool: ${poolLabel})`}
       actions={
-        <ChrPicker value={selectedChrom} onChange={setSelectedChrom} />
+        <span className="inline-flex items-center gap-1">
+          <ChrPicker value={selectedChrom} onChange={setSelectedChrom} />
+          <ResetButton
+            onClick={() => {
+              setSelectedChrom('chr16');
+              setWindow2Center(picked?.midpoint ?? null);
+              setWindow3Center(picked?.midpoint ?? null);
+            }}
+            title="Recenter zoom windows on the active pick"
+          />
+        </span>
       }
     >
       <div className="p-2 flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5 px-1 text-[10px] text-base-content/70">
+        <div className="flex flex-wrap items-center justify-between gap-y-1.5 px-1 text-[10px] text-base-content/70">
           <span className="inline-flex items-center gap-1.5">
-            <span className="font-medium">NPMI partners</span>
+            <span className="font-medium">Co-occurrence partners</span>
             <span>low</span>
             <span
               className="inline-block h-2 w-20 rounded-sm"
@@ -281,237 +344,24 @@ export function ChrDistributionTracks({
                   strokeDasharray="2,2"
                 />
               </svg>
-              <span>picked midpoint</span>
+              <span>picked region</span>
             </span>
           )}
         </div>
-        <div ref={wrapperRef} className="w-full">
+        <div
+          ref={wrapperRef}
+          className={`w-full transition-opacity duration-200 ${
+            histsBlurred ? 'opacity-50' : ''
+          }`}
+          aria-busy={histsBlurred}
+        >
           <svg ref={svgRef} />
         </div>
-        {/* Universe row + scrollable file tracks parked while we focus
-            on the histograms. Wiring still in place via
-            useChrWindowActivations + the WindowContext component below.
-        {picked && window3 && windowUniverse && (
-          <WindowContext
-            range={window3}
-            universe={windowUniverse}
-            files={files}
-            totalFiles={totalFiles}
-            loading={contextLoading}
-            picked={picked}
-          />
-        )}
-        */}
       </div>
     </UMAPCard>
   );
 }
 
-// Universe row + scrollable file-rows block, aligned to track 3's
-// 20 kb window. Universe sits in a fixed-position SVG directly below
-// the histogram block; file rows live in a scrollable container so
-// hundreds of BED files can be inspected without resizing the card.
-// Parked alongside the WindowContext render call inside the parent
-// component — revive both together.
-/*
-function WindowContext({
-  range,
-  universe,
-  files,
-  totalFiles,
-  loading,
-  picked,
-}: {
-  range: [number, number];
-  universe: WindowUniverseRow[];
-  files: FileGroup[] | null;
-  totalFiles: number;
-  loading: boolean;
-  picked: PickedRegion;
-}) {
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const universeSvgRef = useRef<SVGSVGElement>(null);
-  const filesSvgRef = useRef<SVGSVGElement>(null);
-
-  useEffect(() => {
-    const wrapper = wrapperRef.current;
-    if (!wrapper) return;
-
-    const ro = new ResizeObserver(() => render());
-    ro.observe(wrapper);
-    render();
-    return () => ro.disconnect();
-
-    function render() {
-      const universeSvg = universeSvgRef.current;
-      const filesSvg = filesSvgRef.current;
-      if (!wrapper || !universeSvg || !filesSvg) return;
-      const width = wrapper.clientWidth || 600;
-
-      const innerLeft = MARGIN.left;
-      const innerRight = width - MARGIN.right;
-      const x = scaleLinear().domain(range).range([innerLeft, innerRight]);
-
-      // ---- universe row ----
-      universeSvg.setAttribute('width', String(width));
-      universeSvg.setAttribute('height', String(UNIVERSE_ROW_HEIGHT));
-      universeSvg.setAttribute(
-        'viewBox',
-        `0 0 ${width} ${UNIVERSE_ROW_HEIGHT}`,
-      );
-      const uSel = select(universeSvg);
-      uSel.selectAll('*').remove();
-
-      uSel
-        .append('text')
-        .attr('x', innerLeft - 6)
-        .attr('y', UNIVERSE_ROW_HEIGHT / 2)
-        .attr('dy', '0.35em')
-        .attr('text-anchor', 'end')
-        .style('font-size', '9px')
-        .style('font-weight', 500)
-        .style('fill', 'currentColor')
-        .style('opacity', 0.7)
-        .text('UNIVERSE');
-
-      uSel
-        .selectAll<SVGRectElement, WindowUniverseRow>('rect.universe-token')
-        .data(universe)
-        .join('rect')
-        .attr('class', 'universe-token')
-        .attr('x', (d) => x(d.start))
-        .attr('y', 4)
-        .attr('width', (d) => Math.max(1, x(d.end) - x(d.start)))
-        .attr('height', UNIVERSE_ROW_HEIGHT - 8)
-        .attr('fill', (d) => classColor(d.cclass ?? 'unclassed'))
-        .attr('stroke', '#666')
-        .attr('stroke-width', 0.3)
-        .append('title')
-        .text(
-          (d) =>
-            `${d.region} · ${d.cclass ?? 'unclassed'} · ${(d.end - d.start).toLocaleString()} bp`,
-        );
-
-      // Picked indicator on universe row.
-      if (
-        picked.midpoint >= range[0] &&
-        picked.midpoint <= range[1]
-      ) {
-        uSel
-          .append('line')
-          .attr('x1', x(picked.midpoint))
-          .attr('x2', x(picked.midpoint))
-          .attr('y1', 0)
-          .attr('y2', UNIVERSE_ROW_HEIGHT)
-          .attr('stroke', 'currentColor')
-          .attr('stroke-width', 1.5)
-          .attr('stroke-dasharray', '3,2');
-      }
-
-      // ---- file rows ----
-      const fileList = files ?? [];
-      const totalH = fileList.length * FILE_ROW_HEIGHT;
-      filesSvg.setAttribute('width', String(width));
-      filesSvg.setAttribute('height', String(Math.max(FILE_ROW_HEIGHT, totalH)));
-      filesSvg.setAttribute(
-        'viewBox',
-        `0 0 ${width} ${Math.max(FILE_ROW_HEIGHT, totalH)}`,
-      );
-      const fSel = select(filesSvg);
-      fSel.selectAll('*').remove();
-
-      // Faint zebra rows + activations per file.
-      const rowG = fSel.append('g');
-      fileList.forEach((file, i) => {
-        const yTop = i * FILE_ROW_HEIGHT;
-        if (i % 2 === 1) {
-          rowG
-            .append('rect')
-            .attr('x', innerLeft)
-            .attr('y', yTop)
-            .attr('width', innerRight - innerLeft)
-            .attr('height', FILE_ROW_HEIGHT)
-            .attr('fill', 'currentColor')
-            .attr('fill-opacity', 0.025);
-        }
-        // Label column: cell_line · assay/target. Heavily truncated for
-        // narrow rows; full label is in the <title> tooltip on the row.
-        const label = rowG
-          .append('text')
-          .attr('x', innerLeft - 6)
-          .attr('y', yTop + FILE_ROW_HEIGHT / 2)
-          .attr('dy', '0.35em')
-          .attr('text-anchor', 'end')
-          .style('font-size', '8px')
-          .style('fill', 'currentColor')
-          .style('opacity', 0.7)
-          .text(file.label.slice(0, 36));
-        label.append('title').text(file.label);
-
-        const tokenG = rowG.append('g');
-        tokenG
-          .selectAll<SVGRectElement, (typeof file.activations)[number]>(
-            'rect.activation',
-          )
-          .data(file.activations)
-          .join('rect')
-          .attr('class', 'activation')
-          .attr('x', (d) => x(d.start))
-          .attr('y', yTop + 1)
-          .attr('width', (d) => Math.max(1, x(d.end) - x(d.start)))
-          .attr('height', FILE_ROW_HEIGHT - 2)
-          .attr('fill', (d) => classColor(d.cclass ?? 'unclassed'))
-          .attr('stroke', 'white')
-          .attr('stroke-width', 0.25)
-          .append('title')
-          .text(
-            (d) =>
-              `${file.label}\ntoken ${d.token_id} (${d.cclass ?? 'unclassed'})\n${d.start.toLocaleString()}–${d.end.toLocaleString()}`,
-          );
-      });
-
-      // Picked indicator across all file rows.
-      if (
-        picked.midpoint >= range[0] &&
-        picked.midpoint <= range[1] &&
-        totalH > 0
-      ) {
-        fSel
-          .append('line')
-          .attr('x1', x(picked.midpoint))
-          .attr('x2', x(picked.midpoint))
-          .attr('y1', 0)
-          .attr('y2', totalH)
-          .attr('stroke', 'currentColor')
-          .attr('stroke-width', 1)
-          .attr('stroke-opacity', 0.5)
-          .attr('stroke-dasharray', '3,2');
-      }
-    }
-  }, [range, universe, files, picked]);
-
-  return (
-    <div ref={wrapperRef} className="w-full flex flex-col">
-      <svg ref={universeSvgRef} className="block" />
-      <div
-        className="w-full overflow-y-auto border-t border-base-300/50"
-        style={{ height: FILE_LIST_HEIGHT }}
-      >
-        <svg ref={filesSvgRef} className="block" />
-      </div>
-      <div className="text-[10px] text-base-content/50 leading-snug px-1 pt-1">
-        {loading
-          ? 'computing window activations…'
-          : files == null
-            ? 'no activation data (query did not return)'
-            : files.length === 0
-              ? 'no files have token activations in this 20 kb window'
-              : `${totalFiles.toLocaleString()} files with hits in this 20 kb window (scroll for more)`}
-      </div>
-    </div>
-  );
-}
-*/
 
 function drawTrack(
   sel: ReturnType<typeof select<SVGSVGElement, unknown>>,
@@ -520,13 +370,20 @@ function drawTrack(
   yOffset: number,
   width: number,
   picked: PickedRegion | null,
+  hitTokenSet: ReadonlySet<number>,
 ) {
   const innerLeft = MARGIN.left;
   const innerRight = width - MARGIN.right;
   const innerTop = yOffset + MARGIN.top;
   const innerBottom = yOffset + TRACK_HEIGHT - MARGIN.bottom;
 
-  const g = sel.append('g').attr('class', 'track');
+  // Track index encoded as a data attribute so drag callbacks can blur
+  // the tracks below the dragged source by selector.
+  const trackIndex = Math.round(yOffset / (TRACK_HEIGHT + GAP_HEIGHT));
+  const g = sel
+    .append('g')
+    .attr('class', `track track-${trackIndex}`)
+    .attr('data-track-index', trackIndex);
 
   // Label — top-center of the track, above the plot area.
   g.append('text')
@@ -539,15 +396,61 @@ function drawTrack(
     .text(track.label);
 
 
+  const isTokensTrack = track.tokens !== undefined;
   const yMax = track.bins
     ? Math.max(1, ...track.bins.map((b) => b.universe))
     : 1;
   const y = scaleLinear().domain([0, yMax]).nice().range([innerBottom, innerTop]);
 
-  // Bars — only when bins are available; without bins we still want the
-  // axes + frame to anchor the layout (blank track placeholder), with a
-  // centered prompt explaining what would fill it.
-  if (track.bins) {
+  if (isTokensTrack) {
+    // Token rectangles colored by SCREEN class. At ~80 bp/bin a binned
+    // histogram is overkill, so each chr16 universe token in the
+    // window gets a real rect at its actual coords.
+    const tokens = track.tokens ?? [];
+    if (tokens.length > 0) {
+      const lanePadding = 4;
+      const tokG = g.append('g').attr('class', 'tokens');
+      tokG
+        .selectAll<SVGRectElement, WindowToken>('rect')
+        .data(tokens)
+        .join('rect')
+        .attr('x', (d) => x(d.start))
+        .attr('y', innerTop + lanePadding)
+        .attr('width', (d) => Math.max(1, x(d.end) - x(d.start)))
+        .attr('height', innerBottom - innerTop - lanePadding * 2)
+        // Hits (picked + top NPMI partners) get a saturated SCREEN-class
+        // fill; non-hits stay clear with a thin class-tinted outline so
+        // they read as "this slot of universe is occupied" without
+        // competing with the hits visually.
+        .attr('fill', (d) =>
+          hitTokenSet.has(d.token_id) ? classColor(d.cclass) : 'none',
+        )
+        .attr('stroke', (d) => classColor(d.cclass))
+        .attr('stroke-width', (d) => (hitTokenSet.has(d.token_id) ? 0.4 : 0.6))
+        .attr('stroke-opacity', (d) =>
+          hitTokenSet.has(d.token_id) ? 1 : 0.4,
+        )
+        .append('title')
+        .text(
+          (d) =>
+            `${hitTokenSet.has(d.token_id) ? '★ ' : ''}token ${d.token_id} · ${d.cclass} · ${d.start.toLocaleString()}–${d.end.toLocaleString()} (${(d.end - d.start).toLocaleString()} bp)`,
+        );
+    } else if (!picked && track.emptyMessage) {
+      // No pick yet — show the prompt centered in the plot area.
+      g.append('text')
+        .attr('x', (innerLeft + innerRight) / 2)
+        .attr('y', (innerTop + innerBottom) / 2)
+        .attr('dy', '0.35em')
+        .attr('text-anchor', 'middle')
+        .style('font-size', '10px')
+        .style('font-style', 'italic')
+        .style('fill', 'currentColor')
+        .style('opacity', 0.45)
+        .text(track.emptyMessage);
+    }
+    // Otherwise (pick set, tokens still loading, or window genuinely
+    // empty): render only the axes/frame.
+  } else if (track.bins) {
     const maxPartner = Math.max(1, ...track.bins.map((b) => b.partners));
     const color = scaleSequential(interpolateYlOrRd).domain([0, maxPartner]);
 
@@ -602,23 +505,26 @@ function drawTrack(
         .tickFormat((d) => track.xTickFormat(Number(d))),
     );
 
-  // Y axis.
-  g.append('g')
-    .attr('transform', `translate(${innerLeft}, 0)`)
-    .style('font-size', '9px')
-    .call(axisLeft(y).ticks(3).tickFormat((d) => `${d}`));
+  // Y axis + label — only meaningful for the binned histogram tracks.
+  // The tokens track shows individual rects with no count semantic, so
+  // we suppress both to keep the gutter clean.
+  if (!isTokensTrack) {
+    g.append('g')
+      .attr('transform', `translate(${innerLeft}, 0)`)
+      .style('font-size', '9px')
+      .call(axisLeft(y).ticks(3).tickFormat((d) => `${d}`));
 
-  // Y label.
-  g.append('text')
-    .attr(
-      'transform',
-      `translate(${innerLeft - 36}, ${(innerTop + innerBottom) / 2}) rotate(-90)`,
-    )
-    .attr('text-anchor', 'middle')
-    .style('font-size', '9px')
-    .style('fill', 'currentColor')
-    .style('opacity', 0.7)
-    .text('regions / bin');
+    g.append('text')
+      .attr(
+        'transform',
+        `translate(${innerLeft - 36}, ${(innerTop + innerBottom) / 2}) rotate(-90)`,
+      )
+      .attr('text-anchor', 'middle')
+      .style('font-size', '9px')
+      .style('fill', 'currentColor')
+      .style('opacity', 0.7)
+      .text('regions / bin');
+  }
 
   // Plot border.
   g.append('rect')
@@ -631,6 +537,15 @@ function drawTrack(
     .attr('stroke-width', 0.5);
 }
 
+type DragWiring = {
+  getStartCenters: () => { c2: number; c3: number };
+  applyAbsolute: (newCenter2: number, newCenter3: number) => void;
+  isTrackOne: boolean;
+  /** Toggles a blur+dim on the tracks below the dragged source so the
+   * user gets a "this data is about to change" cue. */
+  setDragBlur: (active: boolean) => void;
+};
+
 function drawConnector(
   sel: ReturnType<typeof select<SVGSVGElement, unknown>>,
   parentX: ReturnType<typeof scaleLinear<number, number>>,
@@ -639,6 +554,10 @@ function drawConnector(
   childYOffset: number,
   innerLeft: number,
   innerRight: number,
+  /** When provided, the highlight rect becomes draggable. Drags compute
+   * an absolute center from `(startCenter + cursorOffsetInPx / pxPerBp)`
+   * — captured-at-drag-start to avoid per-tick drift. */
+  drag?: DragWiring,
 ) {
   const parentInnerTop = parentYOffset + MARGIN.top;
   const parentInnerBottom = parentYOffset + TRACK_HEIGHT - MARGIN.bottom;
@@ -691,23 +610,30 @@ function drawConnector(
     .attr('stop-color', '#3b82f6')
     .attr('stop-opacity', 0);
 
-  g.append('polygon')
+  // Element handles — kept around so the drag handler can manipulate
+  // them directly during a drag (no React state churn = no SVG remount
+  // = pointer-coord math stays valid throughout the gesture).
+  const polygon = g
+    .append('polygon')
     .attr(
       'points',
-      [
-        [highlightLeft, parentInnerBottom],
-        [highlightRight, parentInnerBottom],
-        [innerRight, childInnerTop],
-        [innerLeft, childInnerTop],
-      ]
-        .map((p) => p.join(','))
-        .join(' '),
+      buildTrapezoidPoints(
+        highlightLeft,
+        highlightRight,
+        parentInnerBottom,
+        innerLeft,
+        innerRight,
+        childInnerTop,
+      ),
     )
     .attr('fill', `url(#${gradientId})`)
-    .attr('stroke', 'none');
+    .attr('stroke', 'none')
+    .attr('pointer-events', 'none');
 
-  // Highlight rect on top of the parent — fill only.
-  g.append('rect')
+  // Highlight rect on top of the parent. When `drag` is supplied this
+  // is the drag target — see below.
+  const highlightRect = g
+    .append('rect')
     .attr('x', highlightLeft)
     .attr('y', parentInnerTop)
     .attr('width', highlightRight - highlightLeft)
@@ -716,37 +642,155 @@ function drawConnector(
     .attr('fill-opacity', 0.12)
     .attr('stroke', 'none');
 
-  // Open dotted border — top + left + right only. Bottom stays open
-  // because the trapezoid below picks up from there.
-  g.append('path')
+  // Open dotted border — top + left + right only.
+  const dashedPath = g
+    .append('path')
     .attr(
       'd',
-      `M ${highlightLeft} ${parentInnerBottom} ` +
-        `L ${highlightLeft} ${parentInnerTop} ` +
-        `L ${highlightRight} ${parentInnerTop} ` +
-        `L ${highlightRight} ${parentInnerBottom}`,
+      buildDashedBorder(
+        highlightLeft,
+        highlightRight,
+        parentInnerTop,
+        parentInnerBottom,
+      ),
     )
     .attr('fill', 'none')
     .attr('stroke', '#3b82f6')
     .attr('stroke-width', 1)
     .attr('stroke-opacity', 0.6)
-    .attr('stroke-dasharray', '2,2');
+    .attr('stroke-dasharray', '2,2')
+    .attr('pointer-events', 'none');
 
   // Diagonal connectors: parent highlight bottom → child plot-area top.
-  const linePoints: Array<[number, number, number, number]> = [
-    [highlightLeft, parentInnerBottom, innerLeft, childInnerTop],
-    [highlightRight, parentInnerBottom, innerRight, childInnerTop],
-  ];
-  for (const [x1, y1, x2, y2] of linePoints) {
-    g.append('line')
-      .attr('x1', x1)
-      .attr('y1', y1)
-      .attr('x2', x2)
-      .attr('y2', y2)
-      .attr('stroke', '#3b82f6')
-      .attr('stroke-width', 1)
-      .attr('stroke-opacity', 0.5)
-      .attr('stroke-dasharray', '2,2')
-      .attr('fill', 'none');
+  const lineLeft = g
+    .append('line')
+    .attr('x1', highlightLeft)
+    .attr('y1', parentInnerBottom)
+    .attr('x2', innerLeft)
+    .attr('y2', childInnerTop)
+    .attr('stroke', '#3b82f6')
+    .attr('stroke-width', 1)
+    .attr('stroke-opacity', 0.5)
+    .attr('stroke-dasharray', '2,2')
+    .attr('fill', 'none')
+    .attr('pointer-events', 'none');
+  const lineRight = g
+    .append('line')
+    .attr('x1', highlightRight)
+    .attr('y1', parentInnerBottom)
+    .attr('x2', innerRight)
+    .attr('y2', childInnerTop)
+    .attr('stroke', '#3b82f6')
+    .attr('stroke-width', 1)
+    .attr('stroke-opacity', 0.5)
+    .attr('stroke-dasharray', '2,2')
+    .attr('fill', 'none')
+    .attr('pointer-events', 'none');
+
+  if (drag) {
+    const pxPerBp =
+      (parentX.range()[1] - parentX.range()[0]) /
+      (parentX.domain()[1] - parentX.domain()[0]);
+
+    let startC2 = 0;
+    let startC3 = 0;
+    let startPx = 0;
+
+    // Pure-DOM visual update during drag — no React state writes, so the
+    // SVG <g> the drag handler bound to never gets removed mid-gesture.
+    // The bottom two trapezoid corners + diagonal-line bottom endpoints
+    // follow the highlight rect; the top corners stay anchored to the
+    // child's plot frame.
+    const moveVisualBy = (deltaPx: number) => {
+      const newLeft = highlightLeft + deltaPx;
+      const newRight = highlightRight + deltaPx;
+      highlightRect.attr('x', newLeft);
+      polygon.attr(
+        'points',
+        buildTrapezoidPoints(
+          newLeft,
+          newRight,
+          parentInnerBottom,
+          innerLeft,
+          innerRight,
+          childInnerTop,
+        ),
+      );
+      dashedPath.attr(
+        'd',
+        buildDashedBorder(newLeft, newRight, parentInnerTop, parentInnerBottom),
+      );
+      lineLeft.attr('x1', newLeft);
+      lineRight.attr('x1', newRight);
+    };
+
+    highlightRect
+      .style('cursor', 'grab')
+      .call(
+        d3Drag<SVGRectElement, unknown>()
+          .on('start', function (event) {
+            select(this).style('cursor', 'grabbing');
+            const starts = drag.getStartCenters();
+            startC2 = starts.c2;
+            startC3 = starts.c3;
+            startPx = event.x;
+            drag.setDragBlur(true);
+          })
+          .on('drag', (event) => {
+            if (pxPerBp === 0 || !Number.isFinite(pxPerBp)) return;
+            const offsetPx = event.x - startPx;
+            if (!Number.isFinite(offsetPx)) return;
+            moveVisualBy(offsetPx);
+          })
+          .on('end', function (event) {
+            select(this).style('cursor', 'grab');
+            // The committed React state below triggers a full re-render
+            // of the SVG, which restores the unblurred children. We
+            // still flip the flag in case the commit path early-exits.
+            drag.setDragBlur(false);
+            if (pxPerBp === 0 || !Number.isFinite(pxPerBp)) return;
+            const offsetPx = event.x - startPx;
+            if (!Number.isFinite(offsetPx)) return;
+            const offsetBp = offsetPx / pxPerBp;
+            // Now (and only now) commit to React state. The SVG will
+            // re-render with the new center; bars + child track update.
+            drag.applyAbsolute(
+              drag.isTrackOne ? startC2 + offsetBp : startC2,
+              startC3 + offsetBp,
+            );
+          }),
+      );
   }
+}
+
+function buildTrapezoidPoints(
+  hLeft: number,
+  hRight: number,
+  hBottom: number,
+  iLeft: number,
+  iRight: number,
+  cTop: number,
+): string {
+  return [
+    [hLeft, hBottom],
+    [hRight, hBottom],
+    [iRight, cTop],
+    [iLeft, cTop],
+  ]
+    .map((p) => p.join(','))
+    .join(' ');
+}
+
+function buildDashedBorder(
+  left: number,
+  right: number,
+  top: number,
+  bottom: number,
+): string {
+  return (
+    `M ${left} ${bottom} ` +
+    `L ${left} ${top} ` +
+    `L ${right} ${top} ` +
+    `L ${right} ${bottom}`
+  );
 }

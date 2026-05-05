@@ -13,6 +13,15 @@ export type PartnerRow = {
   partner_token_id: number;
   partner_region: string;
   partner_cclass: string;
+  /** Genomic start (bp) of the partner region. Exposed so the dict
+   * panel can lay chips out in chromosomal order. */
+  partner_start: number;
+  /** Genomic end (bp) of the partner region. */
+  partner_end: number;
+  /** UMAP coords for the partner — used to recenter the region UMAP
+   * when a chip is clicked (bedbase-ui centerOnPoint pattern). */
+  partner_umap_x: number;
+  partner_umap_y: number;
   weight: number; // distance for kNN, NPMI weight for NPMI
   rank: number;
 };
@@ -21,6 +30,10 @@ type RawKnn = {
   partner_token_id: number;
   partner_region: string;
   partner_cclass: string;
+  partner_start: number;
+  partner_end: number;
+  partner_umap_x: number;
+  partner_umap_y: number;
   knn_dist: number;
   rank: number;
 };
@@ -29,6 +42,10 @@ type RawNpmi = {
   partner_token_id: number;
   partner_region: string;
   partner_cclass: string;
+  partner_start: number;
+  partner_end: number;
+  partner_umap_x: number;
+  partner_umap_y: number;
   npmi: number;
   n_ab: number;
   n_files_active: number;
@@ -52,6 +69,10 @@ export function useTokenKnnPartners(
           SELECT s.partner_token_id,
                  r.region AS partner_region,
                  COALESCE(r.cclass, 'unclassed') AS partner_cclass,
+                 r.start AS partner_start,
+                 r."end" AS partner_end,
+                 r.umap_x AS partner_umap_x,
+                 r.umap_y AS partner_umap_y,
                  s.knn_dist,
                  s.rank
           FROM src s
@@ -66,6 +87,10 @@ export function useTokenKnnPartners(
           partner_token_id: Number(r.partner_token_id),
           partner_region: r.partner_region,
           partner_cclass: r.partner_cclass,
+          partner_start: Number(r.partner_start),
+          partner_end: Number(r.partner_end),
+          partner_umap_x: Number(r.partner_umap_x),
+          partner_umap_y: Number(r.partner_umap_y),
           weight: Number(r.knn_dist),
           rank: Number(r.rank),
         }))
@@ -147,6 +172,10 @@ export function useTokenNpmiPartners(
             s.partner_id AS partner_token_id,
             r.region AS partner_region,
             COALESCE(r.cclass, 'unclassed') AS partner_cclass,
+            r.start AS partner_start,
+            r."end" AS partner_end,
+            r.umap_x AS partner_umap_x,
+            r.umap_y AS partner_umap_y,
             CASE
               WHEN s.pmi > 0 AND s.n_ab > 0 AND s.n_ab < s.n_total_val
                 THEN s.pmi / NULLIF(-LN(s.n_ab / s.n_total_val), 0)
@@ -179,6 +208,10 @@ export function useTokenNpmiPartners(
       partner_token_id: Number(r.partner_token_id),
       partner_region: r.partner_region,
       partner_cclass: r.partner_cclass,
+      partner_start: Number(r.partner_start),
+      partner_end: Number(r.partner_end),
+      partner_umap_x: Number(r.partner_umap_x),
+      partner_umap_y: Number(r.partner_umap_y),
       weight: Number(r.npmi),
       rank: i + 1,
     })),

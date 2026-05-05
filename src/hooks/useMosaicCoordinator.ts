@@ -16,6 +16,7 @@ export function useMosaicCoordinator() {
     initializeData: ctx.initializeData,
     isReady: ctx.isReady,
     error: ctx.error,
+    loadProgress: ctx.loadProgress,
   };
 }
 

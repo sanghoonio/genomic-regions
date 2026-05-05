@@ -1,9 +1,7 @@
 // Home — the dictionary's main page: top intro row (Section 1: signal /
 // peaks / tokens for a featured interval), then BED + region UMAPs
 // stacked on the left and chromosome distribution + dictionary entry on
-// the right. The earlier Reference draft is kept in
-// src/pages/Reference.tsx
-// as a comparison baseline but isn't routed anywhere right now.
+// the right.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMosaicCoordinator } from '../hooks/useMosaicCoordinator';
@@ -21,7 +19,7 @@ import {
   UMAPTextChip,
 } from '../components/UMAPHeaderChip';
 import { ColorByPicker } from '../components/ColorByPicker';
-// import { DictCard } from '../components/DictCard';  // parked
+import { ResetButton } from '../components/ResetButton';
 import { DictPanel } from '../components/DictPanel';
 import {
   ASSAY_COLORS,
@@ -45,11 +43,6 @@ import { IntervalPicker } from '../components/IntervalPicker';
 import { useFeaturedIntervals } from '../hooks/useFeaturedIntervals';
 import { useFeaturedFiles } from '../hooks/useFeaturedFiles';
 import type { CandidateInterval } from '../lib/candidateIntervals';
-// Parked in favour of the pure-d3 three-track view below.
-// import { ChrDistributionVgplot } from '../components/ChrDistributionVgplot';
-// Token raster — sparse for now, parked while we iterate on chr-dist first.
-// import { useTokenRasterTable } from '../hooks/useTokenRasterTable';
-// import { TokenRasterPlot } from '../components/TokenRasterPlot';
 
 const FILE_COLOR_OPTIONS = [
   { key: 'assay', label: 'Assay' },
@@ -63,8 +56,34 @@ const INITIAL_ZOOM = 0.67;
 type Viewport = { x: number; y: number; scale: number };
 
 export function Home() {
-  const { isReady } = useMosaicCoordinator();
+  const { isReady, loadProgress, error: coordError } = useMosaicCoordinator();
   const [picked, setPicked] = useState<PickedRegion | null>(null);
+
+  // Zoom-window centers for the chr distribution strip. Lifted here so
+  // the dict panel can pan to a partner's position and the chr-dist
+  // card stays a controlled component. Reset to picked.midpoint on a
+  // fresh pick so a new region recenters its own neighborhood.
+  const [window2Center, setWindow2Center] = useState<number | null>(null);
+  const [window3Center, setWindow3Center] = useState<number | null>(null);
+  const pickedMidpoint = picked?.midpoint ?? null;
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWindow2Center(pickedMidpoint);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWindow3Center(pickedMidpoint);
+  }, [pickedMidpoint]);
+  const onDictNavigate = useCallback(
+    (target: { position: number; umap_x: number; umap_y: number }) => {
+      // Pan the chr-distribution zoom windows to the partner's midpoint…
+      setWindow2Center(target.position);
+      setWindow3Center(target.position);
+      // …and recenter the region UMAP on the partner's UMAP coords at
+      // a tighter zoom than the default so the click reads as "zoom in
+      // on this point" (bedbase-ui centerOnPoint pattern).
+      setRegionViewport({ x: target.umap_x, y: target.umap_y, scale: 0.7 });
+    },
+    [],
+  );
 
   // Pin/brush state — mirrors Home.
   const [brushedFileIds, setBrushedFileIds] = useState<string[]>([]);
@@ -175,11 +194,6 @@ export function Home() {
     setPicked(p);
   }, []);
 
-  // Raster parked — see commented-out section in the JSX below.
-  // const { tableName: rasterTable, version: rasterVersion,
-  //         rowCount: rasterRowCount, loading: rasterLoading } =
-  //   useTokenRasterTable(customFileIds, fileColorBy);
-
   const filterSummary = useMemo(() => {
     if (brushedFileIds.length > 0) {
       return `${brushedFileIds.length.toLocaleString()} selected`;
@@ -213,6 +227,10 @@ export function Home() {
     : ['continuous', 'peaks'];
 
   return (
+    <>
+      {!isReady && (
+        <LoadingSplash progress={loadProgress} error={coordError} />
+      )}
     <main className="py-4 px-6 w-full flex flex-col gap-3">
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -347,7 +365,7 @@ export function Home() {
             title="BED File Embeddings"
             suffix={filterSummary ? `(${filterSummary})` : undefined}
             actions={
-              <span className="inline-flex items-center gap-1.5">
+              <span className="inline-flex items-center gap-1">
                 <FilterButton
                   pinnedAssays={pinnedAssays}
                   pinnedCellLines={pinnedCellLines}
@@ -364,6 +382,18 @@ export function Home() {
                     key: o.key,
                     label: o.label,
                   }))}
+                />
+                <ResetButton
+                  onClick={() => {
+                    onClearAll();
+                    setFileColorBy('assay');
+                    setFileViewport(
+                      fileFit
+                        ? { ...fileFit, scale: fileFit.scale * INITIAL_ZOOM }
+                        : null,
+                    );
+                  }}
+                  title="Reset filters, color mode, and zoom"
                 />
               </span>
             }
@@ -407,19 +437,33 @@ export function Home() {
                   : undefined
             }
             actions={
-              <ColorByPicker
-                value={effectiveRegionColorBy}
-                onChange={(k) => setRegionColorBy(k as RegionColorBy)}
-                options={[
-                  { key: 'cclass', label: 'SCREEN class' },
-                  {
-                    key: 'enrichment',
-                    label: 'Selection enrichment',
-                    available: enrichmentAvailable,
-                    hint: enrichmentAvailable ? undefined : 'brush files',
-                  },
-                ]}
-              />
+              <span className="inline-flex items-center gap-1">
+                <ColorByPicker
+                  value={effectiveRegionColorBy}
+                  onChange={(k) => setRegionColorBy(k as RegionColorBy)}
+                  options={[
+                    { key: 'cclass', label: 'SCREEN class' },
+                    {
+                      key: 'enrichment',
+                      label: 'Selection enrichment',
+                      available: enrichmentAvailable,
+                      hint: enrichmentAvailable ? undefined : 'brush files',
+                    },
+                  ]}
+                />
+                <ResetButton
+                  onClick={() => {
+                    setPicked(null);
+                    setRegionColorBy('cclass');
+                    setRegionViewport(
+                      regionFit
+                        ? { ...regionFit, scale: regionFit.scale * INITIAL_ZOOM }
+                        : null,
+                    );
+                  }}
+                  title="Clear pick, color mode, and zoom"
+                />
+              </span>
             }
           >
             <RegionUMAP
@@ -445,16 +489,6 @@ export function Home() {
                   />
                 )
               }
-              // Floating dictionary chip on the region UMAP — replaced
-              // by the DictPanel in the right column. Keep around in
-              // case we want it back.
-              // cornerOverlay={
-              //   <DictCard
-              //     picked={picked}
-              //     isReady={isReady}
-              //     customFileIds={customFileIds}
-              //   />
-              // }
             />
           </UMAPCard>
         </div>
@@ -463,17 +497,67 @@ export function Home() {
           <ChrDistributionTracks
             picked={picked}
             customFileIds={customFileIds}
+            highlightTokenIds={highlightTokenIds}
+            window2Center={window2Center}
+            window3Center={window3Center}
+            setWindow2Center={setWindow2Center}
+            setWindow3Center={setWindow3Center}
           />
           <DictPanel
             picked={picked}
             isReady={isReady}
             customFileIds={customFileIds}
+            onNavigate={onDictNavigate}
           />
-          {/* ChrDistributionVgplot (parked) and TokenRasterPlot (parked)
-              live in components/ — revive when needed. */}
         </div>
       </div>
     </main>
+    </>
   );
 }
 
+function LoadingSplash({
+  progress,
+  error,
+}: {
+  progress: { done: number; total: number; label: string } | null;
+  error: string | null;
+}) {
+  const pct = progress
+    ? Math.round((progress.done / progress.total) * 100)
+    : 0;
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-base-100/95 backdrop-blur-sm">
+      {error ? (
+        <>
+          <span className="text-error text-sm font-semibold">
+            Failed to load dictionary
+          </span>
+          <span className="text-xs text-base-content/60 max-w-md text-center font-mono">
+            {error}
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="text-sm font-medium text-base-content/80">
+            Loading dictionary…
+          </span>
+          <div className="flex flex-col items-center gap-1 w-72">
+            <div className="h-1 w-full bg-base-200 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-primary transition-[width]"
+                // Width is data-driven.
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="text-[10px] text-base-content/50 tabular-nums">
+              {progress
+                ? `${progress.done} / ${progress.total} · ${progress.label}`
+                : 'connecting to data…'}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

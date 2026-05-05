@@ -276,7 +276,15 @@ export function Section1Plot({
       const svg = (plot.tagName === 'svg'
         ? (plot as unknown as SVGSVGElement)
         : (plot.querySelector('svg') as SVGSVGElement | null));
-      const emit = (r: { token_id: number; region: string; cclass: string; start: number; end: number }) => {
+      const emit = (r: {
+        token_id: number;
+        region: string;
+        cclass: string;
+        start: number;
+        end: number;
+        umap_x: number;
+        umap_y: number;
+      }) => {
         onPick({
           token_id: r.token_id,
           region: r.region,
@@ -284,6 +292,8 @@ export function Section1Plot({
           start: r.start,
           end: r.end,
           midpoint: Math.round((r.start + r.end) / 2),
+          umap_x: r.umap_x,
+          umap_y: r.umap_y,
         });
       };
       if (svg) {
@@ -366,6 +376,12 @@ export function Section1Plot({
         className="w-full relative"
         aria-busy={regionsLoading}
       >
+        {/* Caption sits at the SVG's marginLeft (160 px) on top-0 so it
+            aligns with the y-axis tick column and reads as a label for
+            the plot — paired with the legend on the right edge. */}
+        <span className="absolute left-[160px] top-0 z-10 inline-flex items-center text-[10px] leading-tight font-semibold text-base-content/80 pointer-events-none">
+          Selected Interval
+        </span>
         <div className="absolute right-1 top-0 z-10 pointer-events-auto">
           <SectionLegend mode={mode} />
         </div>

@@ -55,6 +55,43 @@ export function useChr16UniverseBins(nBins: number): {
   return { bins, loading, error };
 }
 
+// Light query for chr16 universe tokens overlapping a genomic window —
+// used by the deepest zoom track when we'd rather render tokens at
+// their actual coords than bin them. Returns a small list (~tens of
+// tokens for a 20 kb window).
+export type WindowToken = {
+  token_id: number;
+  start: number;
+  end: number;
+  cclass: string;
+};
+
+export function useChr16WindowTokens(
+  range: [number, number] | null,
+): { tokens: WindowToken[] | null; loading: boolean; error: string | null } {
+  const sql = useMemo(() => {
+    if (!range) return null;
+    const [lo, hi] = range;
+    return `SELECT token_id, start, "end" AS end,
+                   COALESCE(cclass, 'unclassed') AS cclass
+            FROM ${TABLE.regions}
+            WHERE chrom = 'chr16' AND start <= ${hi} AND "end" >= ${lo}
+            ORDER BY start`;
+  }, [range]);
+
+  const { rows, loading, error } = useSqlQuery<WindowToken>(sql, [range]);
+  const tokens = useMemo(() => {
+    if (!rows) return null;
+    return rows.map((r) => ({
+      token_id: Number(r.token_id),
+      start: Number(r.start),
+      end: Number(r.end),
+      cclass: r.cclass,
+    }));
+  }, [rows]);
+  return { tokens, loading, error };
+}
+
 export type PartnerSource = 'kNN' | 'NPMI';
 
 export function useChr16PartnerPositions(

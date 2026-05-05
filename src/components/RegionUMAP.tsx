@@ -24,6 +24,8 @@ export type PickedRegion = {
   start: number;
   end: number;
   midpoint: number;
+  umap_x: number;
+  umap_y: number;
 };
 
 export type RegionUMAPProps = {
@@ -119,7 +121,7 @@ export function RegionUMAP({
     coordinator
       .query(
         `SELECT token_id, region, COALESCE(cclass, 'unclassed') AS cclass,
-                start, "end" AS end, midpoint
+                start, "end" AS end, midpoint, umap_x, umap_y
          FROM ${TABLE.regionsClassed}
          WHERE token_id = ${pickedId}
          LIMIT 1`,
@@ -134,6 +136,8 @@ export function RegionUMAP({
           start: number;
           end: number;
           midpoint: number;
+          umap_x: number;
+          umap_y: number;
         }>;
         if (arr.length > 0) {
           onPickedChange?.({
@@ -143,6 +147,8 @@ export function RegionUMAP({
             start: Number(arr[0].start),
             end: Number(arr[0].end),
             midpoint: Number(arr[0].midpoint),
+            umap_x: Number(arr[0].umap_x),
+            umap_y: Number(arr[0].umap_y),
           });
         } else {
           onPickedChange?.(null);

@@ -18,6 +18,8 @@ export type IntervalRegionRow = {
   start: number;
   end: number;
   cclass: string;
+  umap_x: number;
+  umap_y: number;
 };
 
 export type IntervalActivationRow = {
@@ -36,7 +38,8 @@ export function useIntervalRegions(interval: CandidateInterval | null): {
 } {
   const sql = interval
     ? `SELECT token_id, region, start, "end" AS end,
-              COALESCE(cclass, 'unclassed') AS cclass
+              COALESCE(cclass, 'unclassed') AS cclass,
+              umap_x, umap_y
        FROM ${TABLE.regions}
        WHERE chrom = '${interval.chrom}'
          AND start < ${interval.end}
@@ -50,6 +53,8 @@ export function useIntervalRegions(interval: CandidateInterval | null): {
     start: number;
     end: number;
     cclass: string;
+    umap_x: number;
+    umap_y: number;
   }>(sql, [interval?.interval_id]);
 
   const regions = useMemo<IntervalRegionRow[] | null>(() => {
@@ -60,6 +65,8 @@ export function useIntervalRegions(interval: CandidateInterval | null): {
       start: Number(r.start),
       end: Number(r.end),
       cclass: r.cclass,
+      umap_x: Number(r.umap_x),
+      umap_y: Number(r.umap_y),
     }));
   }, [rows]);
 

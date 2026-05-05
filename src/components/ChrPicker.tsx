@@ -69,7 +69,7 @@ export function ChrPicker({
                         onChange(c);
                         setOpen(false);
                       }}
-                      className={`w-full text-left px-3 py-1 text-xs transition-colors ${
+                      className={`w-full text-left px-3 py-1 text-xs flex items-center justify-between gap-2 transition-colors ${
                         disabled
                           ? 'text-base-content/30 cursor-not-allowed'
                           : selected
@@ -77,7 +77,12 @@ export function ChrPicker({
                             : 'hover:bg-base-200'
                       }`}
                     >
-                      {c}
+                      <span>{c}</span>
+                      {disabled && (
+                        <span className="text-[9px] text-base-content/30">
+                          soon
+                        </span>
+                      )}
                     </button>
                   </li>
                 );

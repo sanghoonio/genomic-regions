@@ -15,20 +15,22 @@ export const TABLE = {
   tracks: 'dict_featured_tracks',
   tokenizedCorpus: 'dict_tokenized_corpus',
   featuredSignal: 'dict_featured_signal',
-  conceptAxes: 'dict_concept_axes',
-  targetEvidence: 'dict_target_evidence',
   regionsClassed: 'dict_regions_classed',
   filesCategorized: 'dict_files_categorized',
 } as const;
 
 export type TableName = (typeof TABLE)[keyof typeof TABLE];
 
-// Parquet files live under /data/dictionary served by Vite's public dir.
-// DuckDB-WASM's read_parquet() needs an absolute HTTP URL — root-relative
-// paths fail with "No files found that match the pattern" because DuckDB
-// interprets them as local-disk paths inside its WASM virtual FS.
-const origin = typeof window === 'undefined' ? '' : window.location.origin;
-const DATA_PREFIX = `${origin}/data/dictionary`;
+// Parquets live in the sanghoonio/genomic-regions HuggingFace dataset.
+// Pinned to a specific commit so app code and data versions stay in
+// lockstep — bump this SHA when you push new parquets to HF.
+//
+// HF's resolve endpoint 302-redirects to the xethub CDN, which honors
+// HTTP range requests (DuckDB-WASM relies on those for partial parquet
+// reads) and serves permissive CORS.
+const HF_REPO = 'sanghoonio/genomic-regions';
+const HF_REVISION = '589db79cf6911c58a790ad68c38c02478f5bf0c4';
+const DATA_PREFIX = `https://huggingface.co/datasets/${HF_REPO}/resolve/${HF_REVISION}`;
 
 export const PARQUET_URLS: Record<keyof typeof TABLE, string | null> = {
   regions: `${DATA_PREFIX}/viz_chr16.parquet`,
@@ -39,8 +41,6 @@ export const PARQUET_URLS: Record<keyof typeof TABLE, string | null> = {
   tracks: `${DATA_PREFIX}/featured_tracks.parquet`,
   tokenizedCorpus: `${DATA_PREFIX}/tokenized_corpus_chr16.parquet`,
   featuredSignal: `${DATA_PREFIX}/featured_signal.parquet`,
-  conceptAxes: `${DATA_PREFIX}/region_concept_axes.parquet`,
-  targetEvidence: `${DATA_PREFIX}/region_target_evidence.parquet`,
   regionsClassed: null, // VIEW only — created from regions, no parquet source
   filesCategorized: null, // VIEW only — created from files, no parquet source
 };
