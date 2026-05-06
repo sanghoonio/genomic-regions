@@ -147,6 +147,17 @@ export function ChrDistributionTracks({
     const hi = Math.min(CHR16_END, window3Center + TRACK_3_HALF_SPAN);
     return [lo, hi];
   }, [window3Center]);
+  // Token fetch covers a wider range than the visible window so the
+  // pan handler has tokens ready to slide into view during a drag —
+  // otherwise off-plot tokens would only render after the drag ends
+  // and a new SQL roundtrip completes.
+  const window3Fetch = useMemo<[number, number] | null>(() => {
+    if (window3Center == null) return null;
+    const buffer = TRACK_3_HALF_SPAN * 2;
+    const lo = Math.max(0, window3Center - TRACK_3_HALF_SPAN - buffer);
+    const hi = Math.min(CHR16_END, window3Center + TRACK_3_HALF_SPAN + buffer);
+    return [lo, hi];
+  }, [window3Center]);
 
   const { bins: bins2 } = useChrDistZoomBins(
     window2,
@@ -158,7 +169,7 @@ export function ChrDistributionTracks({
   // — at 20 kb / 250 bins each bin is ~80 bp, so most bins hold one
   // token anyway. Show tokens at their actual coords colored by
   // SCREEN class instead.
-  const { tokens: window3Tokens } = useChr16WindowTokens(window3);
+  const { tokens: window3Tokens } = useChr16WindowTokens(window3Fetch);
   const hitTokenSet = useMemo(
     () => new Set<number>(highlightTokenIds ?? []),
     [highlightTokenIds],
@@ -387,6 +398,13 @@ export function ChrDistributionTracks({
         const overlay = sel.select<SVGRectElement>(
           `g.track-${T3_IDX} rect.pan-overlay`,
         );
+        // Axis + picked-region indicator inside track 3 — translated
+        // alongside the tokens so the bar positions, tick labels, and
+        // dashed picked line stay aligned during the pan.
+        const t3Axis = sel.select<SVGGElement>(`g.track-${T3_IDX} g.x-axis`);
+        const t3PickedLine = sel.select<SVGLineElement>(
+          `g.track-${T3_IDX} line.picked-indicator`,
+        );
         const highlightRect = sel.select<SVGRectElement>(
           'rect.conn-1-2-highlight',
         );
@@ -408,6 +426,17 @@ export function ChrDistributionTracks({
           const clampedC3 = Math.max(minC3, Math.min(maxC3, wantC3));
           const clampedDeltaPx = (startC3 - clampedC3) * pxPerBpT3;
           tokensG.attr('transform', `translate(${clampedDeltaPx}, 0)`);
+          // Axis baseline stays put; only the tick groups (line +
+          // label) translate so the labels track the panned tokens
+          // while the chromosome rule stays anchored to the plot
+          // frame. d3 sets transform: translate(scale(d),0) on each
+          // .tick — we re-emit it with the pan delta added.
+          t3Axis
+            .selectAll<SVGGElement, number>('.tick')
+            .attr('transform', (d) =>
+              `translate(${xT3(Number(d)) + clampedDeltaPx}, 0)`,
+            );
+          t3PickedLine.attr('transform', `translate(${clampedDeltaPx}, 0)`);
           // Track 2 visuals follow at 1/100 the rate (pxPerBp ratio).
           const t2Delta = -clampedDeltaPx * (pxPerBpT2 / pxPerBpT3);
           const newL = startHL + t2Delta;
@@ -457,6 +486,13 @@ export function ChrDistributionTracks({
           .on('end', () => {
             const finalC3 = apply(accDeltaPx);
             tokensG.attr('transform', null);
+            t3PickedLine.attr('transform', null);
+            // Tick transforms get reset on the next d3 effect run
+            // (the SVG is cleared and rebuilt). We restore them here
+            // so there's no flash before that happens.
+            t3Axis
+              .selectAll<SVGGElement, number>('.tick')
+              .attr('transform', (d) => `translate(${xT3(Number(d))}, 0)`);
             overlay.style('cursor', 'grab');
             panActive = false;
             setWindow3Center(finalC3);
@@ -644,7 +680,27 @@ function drawTrack(
         .attr('height', innerBottom - innerTop)
         .attr('fill', 'transparent')
         .style('cursor', 'grab');
-      const tokG = g.append('g').attr('class', 'tokens');
+      // Clip the tokens to the plot frame — the fetched buffer is
+      // wider than the visible window so we have tokens to slide
+      // into view during a pan, but they shouldn't leak into adjacent
+      // tracks or the panel margins. The clipPath sits on a NON-
+      // translated wrapper g; the inner tokens g is what the pan
+      // handler translates, so the clip rect stays put while the
+      // tokens slide underneath it.
+      const clipId = `tokens-clip-${trackIndex}`;
+      g.append('defs')
+        .append('clipPath')
+        .attr('id', clipId)
+        .append('rect')
+        .attr('x', innerLeft)
+        .attr('y', innerTop)
+        .attr('width', innerRight - innerLeft)
+        .attr('height', innerBottom - innerTop);
+      const tokG = g
+        .append('g')
+        .attr('clip-path', `url(#${clipId})`)
+        .append('g')
+        .attr('class', 'tokens');
       tokG
         .selectAll<SVGRectElement, WindowToken>('rect')
         .data(tokens)
@@ -731,6 +787,7 @@ function drawTrack(
     picked.midpoint <= track.range[1]
   ) {
     g.append('line')
+      .attr('class', 'picked-indicator')
       .attr('x1', x(picked.midpoint))
       .attr('x2', x(picked.midpoint))
       .attr('y1', innerTop)
@@ -742,15 +799,58 @@ function drawTrack(
       .attr('pointer-events', 'none');
   }
 
-  // X axis.
-  g.append('g')
-    .attr('transform', `translate(0, ${innerBottom})`)
-    .style('font-size', '10px')
-    .call(
-      axisBottom(x)
-        .ticks(Math.max(2, Math.floor(width / 100)))
-        .tickFormat((d) => track.xTickFormat(Number(d))),
-    );
+  // X axis. For the tokens track, the axis is generated across a
+  // wider buffer (matching window3Fetch) so panning has tick labels
+  // ready to slide into view; we clip the axis group horizontally to
+  // the plot frame so the off-plot ticks stay hidden until the pan
+  // exposes them.
+  if (isTokensTrack) {
+    const bufferHalfSpan = TRACK_3_HALF_SPAN * 3; // 60 kb total
+    const center = (track.range[0] + track.range[1]) / 2;
+    // ~5 ticks visible in the 20 kb window at 5 kb spacing.
+    const tickStep = TRACK_3_HALF_SPAN / 2; // 5 kb
+    const lo = center - bufferHalfSpan;
+    const hi = center + bufferHalfSpan;
+    const start = Math.ceil(lo / tickStep) * tickStep;
+    const tickValues: number[] = [];
+    for (let v = start; v <= hi; v += tickStep) tickValues.push(v);
+
+    // clipPath sits on an outer (non-translated) wrapper g so the
+    // clip rect's coords stay in absolute SVG user space. The inner
+    // axis g carries the translate(0, innerBottom) — and the pan
+    // handler additionally translates it horizontally — without
+    // dragging the clip along with it.
+    const axisClipId = `axis-clip-${trackIndex}`;
+    g.append('defs')
+      .append('clipPath')
+      .attr('id', axisClipId)
+      .append('rect')
+      .attr('x', innerLeft)
+      .attr('y', innerBottom - 4)
+      .attr('width', innerRight - innerLeft)
+      .attr('height', 32);
+    g.append('g')
+      .attr('clip-path', `url(#${axisClipId})`)
+      .append('g')
+      .attr('class', 'x-axis')
+      .attr('transform', `translate(0, ${innerBottom})`)
+      .style('font-size', '10px')
+      .call(
+        axisBottom(x)
+          .tickValues(tickValues)
+          .tickFormat((d) => track.xTickFormat(Number(d))),
+      );
+  } else {
+    g.append('g')
+      .attr('class', 'x-axis')
+      .attr('transform', `translate(0, ${innerBottom})`)
+      .style('font-size', '10px')
+      .call(
+        axisBottom(x)
+          .ticks(Math.max(2, Math.floor(width / 100)))
+          .tickFormat((d) => track.xTickFormat(Number(d))),
+      );
+  }
 
   // Y axis + label — only meaningful for the binned histogram tracks.
   // The tokens track shows individual rects with no count semantic, so

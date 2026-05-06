@@ -91,7 +91,7 @@ export function Section1Plot({
     // plotHeight intentionally uses baseRows.length (N), not yDomain.length —
     // continuous's PAD facet shares the existing total area so toggling
     // doesn't reflow surrounding content.
-    const plotHeight = Math.max(220, 18 * baseRows.length);
+    const plotHeight = Math.max(220, 20 * baseRows.length);
 
     const xScale = {
       domain: [interval.start, interval.end],
@@ -190,7 +190,7 @@ export function Section1Plot({
           // and labels to non-pad rows.
           Plot.axisFy({
             anchor: 'left',
-            dy: 5.5,
+            dy: 7.5,
             fontSize: 10,
             tickSize: 6,
             ticks: baseRows,

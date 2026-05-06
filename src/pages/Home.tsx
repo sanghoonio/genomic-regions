@@ -263,8 +263,8 @@ export function Home() {
     <main className="py-4 px-6 w-full flex flex-col gap-3">
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-2xl font-extralight">A Dictionary of Regulatory Genomics</h1>
-          <span className="ml-auto text-xs text-base-content/60">
+          <h1 className="text-[25px] font-extralight">A Dictionary of Regulatory Genomics</h1>
+          <span className="ml-auto text-[13px] text-base-content/60">
             <a
               href="https://databio.org/"
               target="_blank"
@@ -284,7 +284,7 @@ export function Home() {
             </a>
           </span>
         </div>
-        <p className="text-sm leading-normal text-base-content/80 mt-2">
+        <p className="text-[15px] leading-normal text-base-content/80 mt-2">
           What are genomic regions? Epigenomic experiments
           measure something biochemical along the genome (protein binding,
           open chromatin, histone marks) by capturing the DNA fragments at
@@ -303,7 +303,7 @@ export function Home() {
           dictionary is what makes co-occurrence queries tractable, and
           what each entry indexes.
         </p>
-        <p className="text-sm leading-normal text-base-content/80 mt-2">
+        <p className="text-[15px] leading-normal text-base-content/80 mt-2">
           A Word2Vec-style model called{' '}
           <span className="font-semibold">Region2Vec</span> learns each
           region's embedding from the tokens it co-occurs with across the
@@ -332,7 +332,7 @@ export function Home() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-3 items-start">
-        <div className="flex flex-col gap-3 pt-1 text-sm leading-normal text-base-content/80">
+        <div className="flex flex-col gap-3 pt-1 text-[15px] leading-normal text-base-content/80">
           {/* Example-Intervals subsection — header scopes the whole
               left column (biology blurb + controls), then the prose,
               then the picker + view toggle, then a closing line that
@@ -341,7 +341,7 @@ export function Home() {
             Example Intervals
           </h2>
           {interval && (
-            <p className="text-sm leading-normal text-base-content/80">
+            <p className="text-[15px] leading-normal text-base-content/80">
               Showing this for{' '}
               <span className="font-semibold">{interval.label}</span>
               {interval.narrative_caption
@@ -397,7 +397,7 @@ export function Home() {
               </select>
             </div>
           </div>
-          <p className="text-sm leading-normal text-base-content/80">
+          <p className="text-[15px] leading-normal text-base-content/80">
             The full visual lives below. In token view, click a token on
             the right to make it the active pick; or select one in the
             region UMAP below. Everything else on the page updates to
