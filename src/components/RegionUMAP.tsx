@@ -300,10 +300,12 @@ export function RegionUMAP({
       style={height != null ? { height } : undefined}
     >
       {headerChip && (
-        <div className="absolute top-2 left-2 z-10">{headerChip}</div>
+        // z-[60] sits above the picked-region marker SVG (zIndex 50)
+        // so the legend doesn't get punched through by the star.
+        <div className="absolute top-2 left-2 z-[60]">{headerChip}</div>
       )}
       {cornerOverlay && (
-        <div className="absolute top-2 right-2 z-10 max-h-[calc(100%-1rem)] flex">
+        <div className="absolute top-2 right-2 z-[60] max-h-[calc(100%-1rem)] flex">
           {cornerOverlay}
         </div>
       )}
