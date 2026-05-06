@@ -233,9 +233,15 @@ export function ChrDistributionTracks({
       const innerLeft = MARGIN.left;
       const innerRight = width - MARGIN.right;
 
+      // While a track-3 pan is in progress, swallow tooltip show
+      // calls — otherwise mousemove over tokens during drag triggers
+      // a flurry of innerHTML/position writes that visibly glitch the
+      // pan animation.
+      let panActive = false;
       // Hover tooltip — direct DOM mutation so mousemove doesn't churn
       // React state. Closures over wrapperRef + tooltipRef.
       const showTooltip = (event: MouseEvent, html: string) => {
+        if (panActive) return;
         const tip = tooltipRef.current;
         const wrap = wrapperRef.current;
         if (!tip || !wrap) return;
@@ -332,6 +338,7 @@ export function ChrDistributionTracks({
           childY,
           innerLeft,
           innerRight,
+          `${i}-${i + 1}`,
           {
             // Captured at drag start so absolute math works against the
             // exact center the user grabbed, not a state value mid-flight.
@@ -344,6 +351,126 @@ export function ChrDistributionTracks({
             setDragBlur,
           },
         );
+      }
+
+      // Track-3 panning: drag on the deepest track's plot area pans
+      // the 20 kb window, bounded by the 2 Mb window above. The drag
+      // updates the DOM directly (token group transform + the 1→2
+      // connector's highlight rect, trapezoid, dashed border, and
+      // diagonal lines) so the pan reads smoothly; window3Center is
+      // committed only on drag end.
+      const T3_IDX = 2;
+      const t3 = tracks[T3_IDX];
+      if (
+        window3 &&
+        window3Center != null &&
+        window2Center != null &&
+        t3.tokens &&
+        t3.tokens.length > 0
+      ) {
+        const xT3 = xScales[T3_IDX];
+        const xT2 = xScales[1];
+        const pxPerBpT3 =
+          (xT3.range()[1] - xT3.range()[0]) /
+          (xT3.domain()[1] - xT3.domain()[0]);
+        const pxPerBpT2 =
+          (xT2.range()[1] - xT2.range()[0]) /
+          (xT2.domain()[1] - xT2.domain()[0]);
+
+        const t2Y = 1 * (TRACK_HEIGHT + GAP_HEIGHT);
+        const t3Y = T3_IDX * (TRACK_HEIGHT + GAP_HEIGHT);
+        const t2InnerTop = t2Y + MARGIN.top;
+        const t2InnerBottom = t2Y + TRACK_HEIGHT - MARGIN.bottom;
+        const t3InnerTop = t3Y + MARGIN.top;
+
+        const tokensG = sel.select<SVGGElement>(`g.track-${T3_IDX} g.tokens`);
+        const overlay = sel.select<SVGRectElement>(
+          `g.track-${T3_IDX} rect.pan-overlay`,
+        );
+        const highlightRect = sel.select<SVGRectElement>(
+          'rect.conn-1-2-highlight',
+        );
+        const trap = sel.select<SVGPolygonElement>('polygon.conn-1-2-trap');
+        const dashed = sel.select<SVGPathElement>('path.conn-1-2-dashed');
+        const lineL = sel.select<SVGLineElement>('line.conn-1-2-line-l');
+        const lineR = sel.select<SVGLineElement>('line.conn-1-2-line-r');
+
+        let startC3 = 0;
+        let startC2 = 0;
+        let startHL = 0;
+        let startHR = 0;
+        let accDeltaPx = 0;
+
+        const apply = (deltaPx: number) => {
+          const minC3 = startC2 - TRACK_2_HALF_SPAN + TRACK_3_HALF_SPAN;
+          const maxC3 = startC2 + TRACK_2_HALF_SPAN - TRACK_3_HALF_SPAN;
+          const wantC3 = startC3 - deltaPx / pxPerBpT3;
+          const clampedC3 = Math.max(minC3, Math.min(maxC3, wantC3));
+          const clampedDeltaPx = (startC3 - clampedC3) * pxPerBpT3;
+          tokensG.attr('transform', `translate(${clampedDeltaPx}, 0)`);
+          // Track 2 visuals follow at 1/100 the rate (pxPerBp ratio).
+          const t2Delta = -clampedDeltaPx * (pxPerBpT2 / pxPerBpT3);
+          const newL = startHL + t2Delta;
+          const newR = startHR + t2Delta;
+          highlightRect.attr('x', newL).attr('width', newR - newL);
+          trap.attr(
+            'points',
+            buildTrapezoidPoints(newL, newR, t2InnerBottom, innerLeft, innerRight, t3InnerTop),
+          );
+          dashed.attr(
+            'd',
+            buildDashedBorder(newL, newR, t2InnerTop, t2InnerBottom),
+          );
+          lineL.attr('x1', newL);
+          lineR.attr('x1', newR);
+          return clampedC3;
+        };
+
+        const dragBehavior = d3Drag<SVGRectElement, unknown>()
+          .clickDistance(4)
+          // Pin the coordinate container to the SVG so event.dx/dy
+          // are stable. By default d3-drag uses the element that
+          // captured the pointerdown — for the token rects that
+          // translate with the pan, that creates a feedback loop
+          // where each tick is measured against the rect's new
+          // position and the cursor "bobs".
+          .container(() => svg)
+          .on('start', () => {
+            startC3 = window3Center;
+            startC2 = window2Center;
+            const hl = highlightRect.node();
+            if (hl) {
+              startHL = +(hl.getAttribute('x') ?? '0');
+              startHR = startHL + +(hl.getAttribute('width') ?? '0');
+            }
+            accDeltaPx = 0;
+            overlay.style('cursor', 'grabbing');
+            // Lock out the tooltip for the duration of the pan so
+            // mousemove over tokens doesn't fight the drag.
+            panActive = true;
+            hideTooltip();
+          })
+          .on('drag', (event) => {
+            accDeltaPx += event.dx;
+            apply(accDeltaPx);
+          })
+          .on('end', () => {
+            const finalC3 = apply(accDeltaPx);
+            tokensG.attr('transform', null);
+            overlay.style('cursor', 'grab');
+            panActive = false;
+            setWindow3Center(finalC3);
+          });
+
+        overlay.call(dragBehavior);
+        // Also apply drag to each token rect so a drag started on a
+        // token also pans (clickDistance(4) means short clicks still
+        // fire the rect's click listener for the cross-view ping).
+        // Cast away the per-rect WindowToken datum — the drag handler
+        // doesn't read d, just event.dx.
+        tokensG
+          .selectAll<SVGRectElement, unknown>('rect')
+          .call(dragBehavior);
       }
     }
   }, [fullBins, bins2, window3Tokens, picked, window2, window3]);
@@ -504,6 +631,19 @@ function drawTrack(
     const tokens = track.tokens ?? [];
     if (tokens.length > 0) {
       const lanePadding = 4;
+      // Pan-drag overlay: rendered BEFORE the tokens group so it sits
+      // beneath the token rects. Pointer events on empty plot area
+      // hit this overlay (drag); pointer events on a token rect hit
+      // the rect (click → ping). Both share the same drag behaviour
+      // wired in the main d3 effect.
+      g.append('rect')
+        .attr('class', 'pan-overlay')
+        .attr('x', innerLeft)
+        .attr('y', innerTop)
+        .attr('width', innerRight - innerLeft)
+        .attr('height', innerBottom - innerTop)
+        .attr('fill', 'transparent')
+        .style('cursor', 'grab');
       const tokG = g.append('g').attr('class', 'tokens');
       tokG
         .selectAll<SVGRectElement, WindowToken>('rect')
@@ -662,6 +802,10 @@ function drawConnector(
   childYOffset: number,
   innerLeft: number,
   innerRight: number,
+  /** Identifier for this connector (e.g. "0-1" for track 1→2). Used as
+   * a class suffix on the elements so external code (the track-3 pan
+   * drag handler) can find them via selector. */
+  pairKey: string,
   /** When provided, the highlight rect becomes draggable. Drags compute
    * an absolute center from `(startCenter + cursorOffsetInPx / pxPerBp)`
    * — captured-at-drag-start to avoid per-tick drift. */
@@ -723,6 +867,7 @@ function drawConnector(
   // = pointer-coord math stays valid throughout the gesture).
   const polygon = g
     .append('polygon')
+    .attr('class', `conn-${pairKey}-trap`)
     .attr(
       'points',
       buildTrapezoidPoints(
@@ -742,6 +887,7 @@ function drawConnector(
   // is the drag target — see below.
   const highlightRect = g
     .append('rect')
+    .attr('class', `conn-${pairKey}-highlight`)
     .attr('x', highlightLeft)
     .attr('y', parentInnerTop)
     .attr('width', highlightRight - highlightLeft)
@@ -753,6 +899,7 @@ function drawConnector(
   // Open dotted border — top + left + right only.
   const dashedPath = g
     .append('path')
+    .attr('class', `conn-${pairKey}-dashed`)
     .attr(
       'd',
       buildDashedBorder(
@@ -772,6 +919,7 @@ function drawConnector(
   // Diagonal connectors: parent highlight bottom → child plot-area top.
   const lineLeft = g
     .append('line')
+    .attr('class', `conn-${pairKey}-line-l`)
     .attr('x1', highlightLeft)
     .attr('y1', parentInnerBottom)
     .attr('x2', innerLeft)
@@ -784,6 +932,7 @@ function drawConnector(
     .attr('pointer-events', 'none');
   const lineRight = g
     .append('line')
+    .attr('class', `conn-${pairKey}-line-r`)
     .attr('x1', highlightRight)
     .attr('y1', parentInnerBottom)
     .attr('x2', innerRight)
