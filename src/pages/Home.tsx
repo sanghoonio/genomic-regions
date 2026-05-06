@@ -606,7 +606,7 @@ function LoadingSplash({
     ? Math.round((progress.done / progress.total) * 100)
     : 0;
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-base-100/95 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[99999] flex flex-col items-center justify-center gap-4 bg-base-100/95 backdrop-blur-sm">
       {error ? (
         <>
           <span className="text-error text-sm font-semibold">
