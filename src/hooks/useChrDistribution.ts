@@ -64,6 +64,8 @@ export type WindowToken = {
   start: number;
   end: number;
   cclass: string;
+  umap_x: number;
+  umap_y: number;
 };
 
 export function useChr16WindowTokens(
@@ -73,7 +75,8 @@ export function useChr16WindowTokens(
     if (!range) return null;
     const [lo, hi] = range;
     return `SELECT token_id, start, "end" AS end,
-                   COALESCE(cclass, 'unclassed') AS cclass
+                   COALESCE(cclass, 'unclassed') AS cclass,
+                   umap_x, umap_y
             FROM ${TABLE.regions}
             WHERE chrom = 'chr16' AND start <= ${hi} AND "end" >= ${lo}
             ORDER BY start`;
@@ -87,6 +90,8 @@ export function useChr16WindowTokens(
       start: Number(r.start),
       end: Number(r.end),
       cclass: r.cclass,
+      umap_x: Number(r.umap_x),
+      umap_y: Number(r.umap_y),
     }));
   }, [rows]);
   return { tokens, loading, error };

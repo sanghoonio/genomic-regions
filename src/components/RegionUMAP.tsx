@@ -31,6 +31,11 @@ type PickedMarkerProps = {
    * class color, so the marker reads as the underlying point itself
    * rather than a separate annotation. */
   color: string;
+  /** Cross-view ping. When this number changes, the marker re-runs
+   * its expanding-ring animation at (pingX, pingY). */
+  pingKey?: number;
+  pingX?: number;
+  pingY?: number;
 };
 // Rounded-star marker — Lucide's Star icon path (24×24, centered at
 // (12, 12)) drawn as a solid filled star so it stands in for the
@@ -51,6 +56,7 @@ class PickedRegionMarker {
   private svg: SVGSVGElement;
   private starGroup: SVGGElement;
   private starPath: SVGPathElement;
+  private ring: SVGCircleElement;
   private currentProps: PickedMarkerProps;
   constructor(node: HTMLDivElement, props: PickedMarkerProps) {
     this.currentProps = props;
@@ -61,14 +67,17 @@ class PickedRegionMarker {
     this.svg.style.width = '100%';
     this.svg.style.height = '100%';
     this.svg.style.pointerEvents = 'none';
-    // Force above any embedding-atlas-internal layers (the selection
-    // halo is drawn on a layer that, by default, sits over the
-    // customOverlay node).
     this.svg.style.zIndex = '50';
-    // Solid star with a `currentColor` stroke (≈ base-content, dark on
-    // light themes / light on dark) so the marker reads as a selected
-    // pin regardless of how close it sits to other similarly-colored
-    // points. vector-effect keeps the stroke crisp at any scale.
+    // Pulse ring — fixed r, animated stroke-width + opacity via CSS
+    // keyframes so the picked point reads as just-clicked when the
+    // cross-view ping fires.
+    this.ring = document.createElementNS(SVG_NS, 'circle');
+    this.ring.setAttribute('r', '12');
+    this.ring.setAttribute('fill', 'none');
+    this.ring.setAttribute('stroke', '#525252');
+    this.ring.setAttribute('stroke-width', '0');
+    this.ring.setAttribute('opacity', '0');
+    this.svg.appendChild(this.ring);
     this.starGroup = document.createElementNS(SVG_NS, 'g');
     this.starPath = document.createElementNS(SVG_NS, 'path');
     this.starPath.setAttribute('d', STAR_PATH_D);
@@ -81,13 +90,31 @@ class PickedRegionMarker {
     this.svg.appendChild(this.starGroup);
     node.appendChild(this.svg);
     this.render();
+    if (props.pingKey != null) this.firePing();
   }
   update(props: PickedMarkerProps) {
+    const prevPing = this.currentProps.pingKey;
     this.currentProps = props;
     this.render();
+    if (props.pingKey != null && props.pingKey !== prevPing) this.firePing();
   }
   destroy() {
     this.svg.remove();
+  }
+  private firePing() {
+    // Position the ring at the ping target's coords (which may differ
+    // from the picked anchor) just before triggering the CSS keyframe.
+    // Stroke is a fixed neutral gray so the ping reads as a UI cue
+    // rather than a class-color highlight.
+    const { proxy, pickedX, pickedY, pingX, pingY } = this.currentProps;
+    const tx = pingX ?? pickedX;
+    const ty = pingY ?? pickedY;
+    const { x, y } = proxy.location(tx, ty);
+    this.ring.setAttribute('cx', String(x));
+    this.ring.setAttribute('cy', String(y));
+    this.ring.classList.remove('umap-ping');
+    void this.ring.getBoundingClientRect();
+    this.ring.classList.add('umap-ping');
   }
   private render() {
     const { proxy, pickedX, pickedY, color } = this.currentProps;
@@ -150,6 +177,13 @@ export type RegionUMAPProps = {
    * from its highlighted partners. The color is typically the
    * region's SCREEN class color. */
   pickedUmap?: { x: number; y: number; color: string } | null;
+  /** Cross-view ping target. When `pingKey` is supplied (a timestamp
+   * that changes on each ping), an expanding ring fires at
+   * (pingX, pingY); these may differ from the picked anchor's coords
+   * (e.g. when the user clicks a partner chip in the dict panel). */
+  pingKey?: number;
+  pingX?: number;
+  pingY?: number;
 };
 
 export function RegionUMAP({
@@ -164,6 +198,9 @@ export function RegionUMAP({
   viewportState,
   onViewportState,
   pickedUmap,
+  pingKey,
+  pingX,
+  pingY,
 }: RegionUMAPProps) {
   const { coordinator, isReady } = useMosaicCoordinator();
 
@@ -337,6 +374,9 @@ export function RegionUMAP({
                     pickedX: pickedUmap.x,
                     pickedY: pickedUmap.y,
                     color: pickedUmap.color,
+                    pingKey,
+                    pingX,
+                    pingY,
                   },
                 }
               : null

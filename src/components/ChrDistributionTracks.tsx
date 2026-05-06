@@ -83,6 +83,13 @@ export type ChrDistributionTracksProps = {
   window3Center: number | null;
   setWindow2Center: Dispatch<SetStateAction<number | null>>;
   setWindow3Center: Dispatch<SetStateAction<number | null>>;
+  /** Cross-view ping target — when set, the matching token rect in
+   * track 3 briefly flashes a ring/glow stroke. */
+  ping?: { tokenId: number; t: number } | null;
+  /** Fired when the user clicks a token rect in track 3 (the deepest
+   * window where individual tokens are rendered). Parent uses this to
+   * trigger the cross-view ping. */
+  onTokenClick?: (token: WindowToken) => void;
 };
 
 export function ChrDistributionTracks({
@@ -93,10 +100,17 @@ export function ChrDistributionTracks({
   window3Center,
   setWindow2Center,
   setWindow3Center,
+  ping,
+  onTokenClick,
 }: ChrDistributionTracksProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  // Keep the latest token-click handler in a ref so the d3 click
+  // listener captures the current callback without re-running the
+  // whole render on every render.
+  const onTokenClickRef = useRef(onTokenClick);
+  onTokenClickRef.current = onTokenClick;
 
   // Placeholder chromosome selection: only chr16 has data plumbed
   // through right now, so the picker is dummy state for now. Surfacing
@@ -269,6 +283,7 @@ export function ChrDistributionTracks({
           hitTokenSet,
           showTooltip,
           hideTooltip,
+          (token) => onTokenClickRef.current?.(token),
         );
       });
 
@@ -332,6 +347,25 @@ export function ChrDistributionTracks({
       }
     }
   }, [fullBins, bins2, window3Tokens, picked, window2, window3]);
+
+  // Cross-view ping: when the parent fires a ping, find the matching
+  // token rect in track 3 and toggle the .ping-stroke class so the
+  // CSS keyframe animation runs. We remove + re-add the class (with a
+  // forced reflow) so consecutive pings on the same id retrigger the
+  // animation.
+  useEffect(() => {
+    if (!ping || !svgRef.current) return;
+    const sel = select(svgRef.current)
+      .selectAll<SVGRectElement, WindowToken>(
+        `rect[data-token-id="${ping.tokenId}"]`,
+      );
+    if (sel.empty()) return;
+    sel.classed('ping-stroke', false);
+    void (sel.node() as SVGRectElement | null)?.getBoundingClientRect();
+    sel.classed('ping-stroke', true);
+    const handle = window.setTimeout(() => sel.classed('ping-stroke', false), 1300);
+    return () => window.clearTimeout(handle);
+  }, [ping]);
 
   const poolLabel =
     customFileIds && customFileIds.length > 0
@@ -431,6 +465,7 @@ function drawTrack(
   hitTokenSet: ReadonlySet<number>,
   showTooltip: (event: MouseEvent, html: string) => void,
   hideTooltip: () => void,
+  onTokenClick?: (token: WindowToken) => void,
 ) {
   const innerLeft = MARGIN.left;
   const innerRight = width - MARGIN.right;
@@ -474,6 +509,7 @@ function drawTrack(
         .selectAll<SVGRectElement, WindowToken>('rect')
         .data(tokens)
         .join('rect')
+        .attr('data-token-id', (d) => String(d.token_id))
         .attr('x', (d) => x(d.start))
         .attr('y', innerTop + lanePadding)
         .attr('width', (d) => Math.max(1, x(d.end) - x(d.start)))
@@ -493,7 +529,13 @@ function drawTrack(
         .on('mouseenter mousemove', function (event, d) {
           showTooltip(event, formatTokenTooltip(d, picked, hitTokenSet));
         })
-        .on('mouseleave', hideTooltip);
+        .on('mouseleave', hideTooltip)
+        .on('click', function (event, d) {
+          event.stopPropagation();
+          onTokenClick?.(d);
+        })
+        .style('cursor', 'pointer')
+        .style('pointer-events', 'all');
     } else if (!picked && track.emptyMessage) {
       // No pick yet — show the prompt centered in the plot area.
       g.append('text')
@@ -555,7 +597,9 @@ function drawTrack(
       .attr('y2', innerBottom)
       .attr('stroke', 'currentColor')
       .attr('stroke-width', 1.5)
-      .attr('stroke-dasharray', '3,2');
+      .attr('stroke-dasharray', '3,2')
+      // Don't intercept clicks aimed at the underlying token rect.
+      .attr('pointer-events', 'none');
   }
 
   // X axis.
@@ -597,7 +641,8 @@ function drawTrack(
     .attr('height', innerBottom - innerTop)
     .attr('fill', 'none')
     .attr('stroke', '#ddd')
-    .attr('stroke-width', 0.5);
+    .attr('stroke-width', 0.5)
+    .attr('pointer-events', 'none');
 }
 
 type DragWiring = {
@@ -879,7 +924,13 @@ function formatTokenTooltip(
     : isHit
       ? '<span class="text-warning font-semibold">★ partner</span>'
       : '<span class="text-base-content/50">universe token</span>';
-  const cclassRow = `<div><span class="text-base-content/60">class</span> <span class="font-semibold">${escapeHtml(d.cclass)}</span></div>`;
+  // Render the SCREEN class as a colored pill so the tooltip
+  // carries the same visual key as the legend and partner chips.
+  const cclassColor = classColor(d.cclass);
+  const cclassRow =
+    `<div><span class="text-base-content/60">class</span> ` +
+    `<span class="inline-block px-1.5 rounded-full text-[10px] font-semibold text-white align-baseline" ` +
+    `style="background:${cclassColor}">${escapeHtml(d.cclass)}</span></div>`;
   const coordsRow = `<div class="font-mono text-base-content">${d.start.toLocaleString()}–${d.end.toLocaleString()} <span class="text-base-content/50">(${(d.end - d.start).toLocaleString()} bp)</span></div>`;
   const distRow =
     picked && !isPick

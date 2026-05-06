@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>CDH1 — A Dictionary of Regulatory Genomics (Static)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="kicker">A DICTIONARY OF REGULATORY GENOMICS — STATIC LENS</p>
+        <h1>
+          CDH1's regulatory neighborhood, recovered from
+          co-occurrence alone.
+        </h1>
+        <p class="dek">
+          Region2Vec learns each chr16 regulatory region's embedding
+          from the experiments it co-occurs in. We anchor on the
+          <strong>CDH1 / E-cadherin promoter</strong>
+          (chr16:68,737,071–68,737,417, PLS) and read out its top 30
+          NPMI partners on two coordinate systems: the learned UMAP
+          embedding (top), and chr16 itself, zoomed three times
+          (bottom). The dictionary surfaces three concentric layers
+          of CDH1 biology — its cis enhancer cluster, the
+          <strong>CDH3</strong> paralog 92 kb upstream, and a distal
+          hub at chr16:71.6 Mb — all without ever using genomic
+          distance as input.
+        </p>
+      </header>
+
+      <section id="figure">
+        <div class="toolbar">
+          <button type="button" id="download-svg">Download SVG</button>
+          <button type="button" id="print-figure">Print</button>
+        </div>
+        <svg id="static" role="img" aria-label="CDH1 partners across UMAP and chr16"></svg>
+      </section>
+
+      <footer>
+        <p class="caption">
+          <strong>What you're looking at.</strong>
+          <em>Top:</em> the chr16 region UMAP. Each grey point is one of
+          ~36 k regulatory regions; coloured points are CDH1's top-30
+          NPMI partners; the black star is CDH1 itself. <em>Bottom:</em>
+          chr16 at three zoom levels — the full chromosome, a 2 Mb
+          window centered on CDH1, and a 20 kb window. Each partner
+          appears in track A and (where it falls within the window)
+          in tracks B and C. Beziers between the UMAP and track A link
+          each partner across the two coordinate systems.
+        </p>
+        <p class="caption">
+          <strong>What it shows.</strong>
+          Twenty of CDH1's thirty partners are <em>proximal enhancers</em>
+          (pELS) and nine are <em>promoters</em> (PLS). Three of the
+          enhancers sit within 1 kb of CDH1's TSS — the cis regulatory
+          module — and the closest promoter partner is
+          <strong>CDH3 (P-cadherin)</strong>, CDH1's paralog 92 kb
+          upstream. Four more partners cluster ~3 Mb away at
+          chr16:71.6 Mb (a distal regulatory hub the embedding places
+          right next to CDH1). Across the 90 Mb of chr16 the
+          partner distribution is uneven — partners cluster, with long
+          stretches empty — and the embedding mirrors that clustering:
+          PLS partners (including CDH3 and the 15 Mb-distant rank-8
+          PLS) sit tight against CDH1, while pELS partners scatter
+          more widely. The reading argues that what NPMI captures is
+          functional class plus shared cell-type program, not raw
+          genomic proximity.
+        </p>
+      </footer>
+    </main>
+
+    <script src="data/cdh1.js"></script>
+    <script src="static.js"></script>
+  </body>
+</html>

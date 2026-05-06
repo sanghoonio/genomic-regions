@@ -68,8 +68,28 @@ export function Home() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setWindow3Center(pickedMidpoint);
   }, [pickedMidpoint]);
+  // Shared "ping" — when the user clicks a region in any of the three
+  // surfaces (region UMAP, chr-dist track 3, or a dict-panel chip),
+  // the same token gets a temporary glow/ring in every other surface
+  // so the cross-view connection reads. The umap_x/umap_y travel with
+  // the ping so the region UMAP can place its ring at the clicked
+  // partner's coords (which may not equal the picked anchor's).
+  type Ping = { tokenId: number; umap_x: number; umap_y: number; t: number };
+  const [ping, setPing] = useState<Ping | null>(null);
+  const PING_MS = 1200;
+  const triggerPing = useCallback(
+    (tokenId: number, umap_x: number, umap_y: number) => {
+      const t = Date.now();
+      setPing({ tokenId, umap_x, umap_y, t });
+      setTimeout(() => {
+        setPing((cur) => (cur && cur.t === t ? null : cur));
+      }, PING_MS);
+    },
+    [],
+  );
+
   const onDictNavigate = useCallback(
-    (target: { position: number; umap_x: number; umap_y: number }) => {
+    (target: { tokenId: number; position: number; umap_x: number; umap_y: number }) => {
       // Pan the chr-distribution zoom windows to the partner's midpoint…
       setWindow2Center(target.position);
       setWindow3Center(target.position);
@@ -77,8 +97,19 @@ export function Home() {
       // a tighter zoom than the default so the click reads as "zoom in
       // on this point" (bedbase-ui centerOnPoint pattern).
       setRegionViewport({ x: target.umap_x, y: target.umap_y, scale: 0.7 });
+      triggerPing(target.tokenId, target.umap_x, target.umap_y);
     },
-    [],
+    [triggerPing],
+  );
+
+  const onChrTokenClick = useCallback(
+    (token: { token_id: number; umap_x: number; umap_y: number }) => {
+      // Mirror the dict-card click: ping the cross-views and also
+      // recenter the region UMAP on the clicked token (centerOnPoint).
+      triggerPing(token.token_id, token.umap_x, token.umap_y);
+      setRegionViewport({ x: token.umap_x, y: token.umap_y, scale: 0.7 });
+    },
+    [triggerPing],
   );
 
   // Pin/brush state — mirrors Home.
@@ -187,6 +218,8 @@ export function Home() {
   }, [regionFit, regionViewport]);
 
   const onPicked = useCallback((p: PickedRegion | null) => {
+    // No ping on UMAP click — picking a region already moves the
+    // picked star to the new point, which is signal enough.
     setPicked(p);
   }, []);
 
@@ -514,6 +547,9 @@ export function Home() {
                     }
                   : null
               }
+              pingKey={ping?.t}
+              pingX={ping?.umap_x}
+              pingY={ping?.umap_y}
               headerChip={
                 effectiveRegionColorBy === 'enrichment' ? (
                   <UMAPGradientChip
@@ -542,11 +578,14 @@ export function Home() {
             window3Center={window3Center}
             setWindow2Center={setWindow2Center}
             setWindow3Center={setWindow3Center}
+            ping={ping}
+            onTokenClick={onChrTokenClick}
           />
           <DictPanel
             picked={picked}
             isReady={isReady}
             customFileIds={customFileIds}
+            ping={ping}
             onNavigate={onDictNavigate}
           />
         </div>

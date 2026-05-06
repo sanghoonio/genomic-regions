@@ -153,6 +153,9 @@ function summarizeStrip(
 }
 
 export type DictNavTarget = {
+  /** Token id of the clicked region. The Home page uses this to fire
+   * the cross-view "ping" highlight. */
+  tokenId: number;
   /** bp midpoint — recenters the chr-dist zoom windows. */
   position: number;
   /** UMAP coords — recenters the region UMAP (bedbase centerOnPoint). */
@@ -164,11 +167,17 @@ export function DictPanel({
   picked,
   isReady,
   customFileIds,
+  ping,
   onNavigate,
 }: {
   picked: PickedRegion | null;
   isReady: boolean;
   customFileIds?: ReadonlyArray<string> | null;
+  /** Cross-view ping target. When `ping.tokenId` matches a chip's
+   * token, that chip briefly animates a ring around itself. The
+   * timestamp `t` is included in the chip's React key so consecutive
+   * pings on the same id retrigger the animation. */
+  ping?: { tokenId: number; t: number } | null;
   /** Called when the user clicks any chip (picked or partner). Parent
    * uses the supplied target to pan the chr-dist windows AND recenter
    * the region UMAP — analog of bedbase-ui's centerOnPoint. */
@@ -237,6 +246,7 @@ export function DictPanel({
               : 'full corpus'
           }
           poolTooSmall={!!customFileIds && customFileIds.length < 2}
+          ping={ping}
           onNavigate={onNavigate}
           showTip={showTip}
           hideTip={hideTip}
@@ -260,6 +270,7 @@ function PickedContent({
   npmiMeta,
   poolLabel,
   poolTooSmall,
+  ping,
   onNavigate,
   showTip,
   hideTip,
@@ -273,6 +284,7 @@ function PickedContent({
    * least two files to estimate co-occurrence probabilities, so we
    * short-circuit the partners block with a guidance note. */
   poolTooSmall: boolean;
+  ping?: { tokenId: number; t: number } | null;
   onNavigate?: (target: DictNavTarget) => void;
   showTip: ShowTip;
   hideTip: HideTip;
@@ -369,6 +381,7 @@ function PickedContent({
             <PartnerStrip
               picked={picked}
               partners={npmiPartners}
+              ping={ping}
               onNavigate={onNavigate}
               showTip={showTip}
               hideTip={hideTip}
@@ -402,12 +415,14 @@ type StripEntry =
 function PartnerStrip({
   picked,
   partners,
+  ping,
   onNavigate,
   showTip,
   hideTip,
 }: {
   picked: PickedRegion;
   partners: PartnerRow[];
+  ping?: { tokenId: number; t: number } | null;
   onNavigate?: (target: DictNavTarget) => void;
   showTip: ShowTip;
   hideTip: HideTip;
@@ -417,6 +432,14 @@ function PartnerStrip({
   // that splits before/after partners — fudoki-style "you are here".
   const entries: StripEntry[] = [];
   const N = partners.length;
+  // NPMI rank → opacity. Rank-based (not value-based) so the
+  // opacity gradient is fully spread across the visible partners
+  // even when their absolute NPMI values cluster in a narrow band
+  // (top-30 NPMIs often sit between, say, 0.55–0.69).
+  const opacityFor = (rank: number) => {
+    if (N <= 1) return 1;
+    return 1.0 - 0.6 * ((rank - 1) / (N - 1));
+  };
   // Rank partners by bp width descending: the largest region gets
   // bpRank 0 (→ CHIP_MAX_WIDTH_PX), the smallest gets bpRank N-1
   // (→ CHIP_MIN_WIDTH_PX). NPMI rank is the tiebreak so the order is
@@ -453,10 +476,16 @@ function PartnerStrip({
       {entries.map((e) =>
         e.kind === 'picked' ? (
           <PickedChip
-            key={`picked-${picked.token_id}`}
+            key={
+              ping?.tokenId === picked.token_id
+                ? `picked-${picked.token_id}-${ping.t}`
+                : `picked-${picked.token_id}`
+            }
             picked={picked}
+            pinged={ping?.tokenId === picked.token_id}
             onClick={() =>
               onNavigate?.({
+                tokenId: picked.token_id,
                 position: picked.midpoint,
                 umap_x: picked.umap_x,
                 umap_y: picked.umap_y,
@@ -467,12 +496,19 @@ function PartnerStrip({
           />
         ) : (
           <PartnerChip
-            key={`p-${e.partner.partner_token_id}`}
+            key={
+              ping?.tokenId === e.partner.partner_token_id
+                ? `p-${e.partner.partner_token_id}-${ping.t}`
+                : `p-${e.partner.partner_token_id}`
+            }
             partner={e.partner}
             distanceBp={e.midpoint - picked.midpoint}
             widthPx={e.widthPx}
+            opacity={opacityFor(e.partner.rank)}
+            pinged={ping?.tokenId === e.partner.partner_token_id}
             onClick={() =>
               onNavigate?.({
+                tokenId: e.partner.partner_token_id,
                 position: e.midpoint,
                 umap_x: e.partner.partner_umap_x,
                 umap_y: e.partner.partner_umap_y,
@@ -507,11 +543,13 @@ function Chin({ abbr, color }: { abbr: string; color: string }) {
 
 function PickedChip({
   picked,
+  pinged,
   onClick,
   showTip,
   hideTip,
 }: {
   picked: PickedRegion;
+  pinged?: boolean;
   onClick: () => void;
   showTip: ShowTip;
   hideTip: HideTip;
@@ -527,7 +565,7 @@ function PickedChip({
       onMouseEnter={(e) => showTip(e, tipHtml)}
       onMouseMove={(e) => showTip(e, tipHtml)}
       onMouseLeave={hideTip}
-      className="inline-flex flex-col items-stretch justify-end overflow-hidden rounded-sm hover:bg-base-200 transition-colors cursor-pointer text-center"
+      className={`inline-flex flex-col items-stretch justify-end overflow-hidden rounded-sm hover:bg-base-200 transition-colors cursor-pointer text-center ${pinged ? 'ping-active' : ''}`}
       style={{ width: CHIP_MAX_WIDTH_PX }}
     >
       {/* No outline on the picked variant — the saturated inset ring
@@ -556,6 +594,8 @@ function PartnerChip({
   partner,
   distanceBp,
   widthPx,
+  opacity,
+  pinged,
   onClick,
   showTip,
   hideTip,
@@ -565,6 +605,9 @@ function PartnerChip({
   distanceBp: number;
   /** Pixel width — encodes NPMI rank (top is widest). */
   widthPx: number;
+  /** 0–1 opacity, scaled to NPMI weight by the parent strip. */
+  opacity: number;
+  pinged?: boolean;
   onClick: () => void;
   showTip: ShowTip;
   hideTip: HideTip;
@@ -581,8 +624,8 @@ function PartnerChip({
       onMouseEnter={(e) => showTip(e, tipHtml)}
       onMouseMove={(e) => showTip(e, tipHtml)}
       onMouseLeave={hideTip}
-      className="inline-flex flex-col items-stretch justify-end overflow-hidden rounded-sm hover:bg-base-200 transition-colors cursor-pointer text-center"
-      style={{ width: widthPx }}
+      className={`inline-flex flex-col items-stretch justify-end overflow-hidden rounded-sm hover:bg-base-200 transition-colors cursor-pointer text-center ${pinged ? 'ping-active' : ''}`}
+      style={{ width: widthPx, opacity }}
     >
       {/* Faint top + side outline on the text panel only — the chin
           stays a clean color block. */}

@@ -7,6 +7,7 @@
 // hovered point's fields.
 
 import { createRoot, type Root } from 'react-dom/client';
+import { SCREEN_CLASS_COLORS } from '../lib/colors';
 
 type TooltipPoint = {
   text?: string;
@@ -55,14 +56,34 @@ function TooltipBody({ tooltip, identifierLabel }: Props) {
       )}
       {fieldEntries.length > 0 && (
         <div className="flex flex-col gap-0.5 mt-1">
-          {fieldEntries.map(([key, val]) => (
-            <div key={key}>
-              <span className="text-base-content/45">{key}</span>{' '}
-              <span>
-                {typeof val === 'number' ? val.toLocaleString() : String(val)}
-              </span>
-            </div>
-          ))}
+          {fieldEntries.map(([key, val]) => {
+            // Render the SCREEN class as a colored pill so the
+            // tooltip carries the same visual key as the legend
+            // and partner chips.
+            const screenColor =
+              key === 'class' && typeof val === 'string'
+                ? SCREEN_CLASS_COLORS[val]
+                : undefined;
+            return (
+              <div key={key}>
+                <span className="text-base-content/45">{key}</span>{' '}
+                {screenColor ? (
+                  <span
+                    className="inline-block px-1.5 rounded-full text-[10px] font-semibold text-white align-baseline"
+                    style={{ backgroundColor: screenColor }}
+                  >
+                    {val}
+                  </span>
+                ) : (
+                  <span>
+                    {typeof val === 'number'
+                      ? val.toLocaleString()
+                      : String(val)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

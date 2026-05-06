@@ -86,3 +86,34 @@
     background-color: var(--color-base-100);
   }
 }
+
+/* Cross-view "ping" — applied briefly when the user clicks a region
+   in any of the three surfaces (region UMAP, chr-dist last track,
+   dict-panel chip). The same target gets a temporary expanding ring
+   in every other surface so the connection reads. */
+@keyframes ping-ring {
+  0%   { box-shadow: 0 0 0 0 oklch(45% 0.005 240 / 0.55); }
+  60%  { box-shadow: 0 0 0 10px oklch(45% 0.005 240 / 0); }
+  100% { box-shadow: 0 0 0 0 oklch(45% 0.005 240 / 0); }
+}
+.ping-active {
+  animation: ping-ring 1.2s ease-out;
+}
+
+@keyframes ping-stroke {
+  0%   { stroke-width: 3; stroke-opacity: 1; }
+  100% { stroke-width: 0.5; stroke-opacity: 0.5; }
+}
+.ping-stroke {
+  animation: ping-stroke 1.2s ease-out;
+}
+
+/* Region-UMAP picked-marker pulse — fixed-r circle whose stroke
+   blooms then fades. Used by PickedRegionMarker.firePing(). */
+@keyframes umap-ping {
+  0%   { stroke-width: 12; opacity: 0.85; }
+  100% { stroke-width: 0;  opacity: 0; }
+}
+.umap-ping {
+  animation: umap-ping 1.2s ease-out;
+}
